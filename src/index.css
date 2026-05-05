@@ -802,6 +802,30 @@ button:disabled {
   margin-bottom: 0;
 }
 
+.uploadDebugPanel {
+  margin-top: 10px;
+  border: 1px solid #f1c9c6;
+  background: #fff7f7;
+  border-radius: 12px;
+  padding: 8px 10px;
+}
+
+.uploadDebugPanel summary {
+  cursor: pointer;
+  color: #b42318;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.uploadDebugPanel pre {
+  margin: 8px 0 0;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: #475569;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .progressLabel {
   margin: 0 0 0.35rem;
   color: #4e5968;

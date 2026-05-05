@@ -36,6 +36,17 @@ interface QuizResultSummary {
   score: number
   elapsedSeconds: number
 }
+interface UploadDebugInfo {
+  time: string
+  code: PdfErrorCode
+  message: string
+  errorName: string
+  errorMessage: string
+  fileName: string
+  fileSize: number
+  fileType: string
+  userAgent: string
+}
 type AnalyticsRange = '7d' | '30d' | 'all'
 type AnalyticsMode = 'live' | 'stress'
 type SubjectId = 1 | 2 | 3 | 4 | 5
@@ -63,6 +74,7 @@ function App() {
   const [order, setOrder] = useState<SessionConfig['order'] | null>(null)
   const [selectedFileName, setSelectedFileName] = useState('')
   const [selectedFileSize, setSelectedFileSize] = useState('')
+  const [uploadDebugInfo, setUploadDebugInfo] = useState<UploadDebugInfo | null>(null)
   const [isParsing, setIsParsing] = useState(false)
   const [isAnswerChecked, setIsAnswerChecked] = useState(false)
   const [isCurrentAnswerCorrect, setIsCurrentAnswerCorrect] = useState<boolean | null>(null)
@@ -203,6 +215,7 @@ function App() {
   const uploadPdf = async (file: File): Promise<void> => {
     try {
       setIsParsing(true)
+      setUploadDebugInfo(null)
       let parsed = await parseQuestionsFromPdfFile(file, file.name)
       if (!parsed.length) {
         const fallbackText = await extractTextFromPdf(file)
@@ -242,7 +255,19 @@ function App() {
         MALFORMED_PDF: '파일을 읽을 수 없어요. 다른 PDF로 다시 시도해 주세요.',
         PARSE_FAILED: '문제를 추출하지 못했어요. 다른 PDF로 다시 시도해 주세요.',
       }
-      window.alert(safeMessageMap[code])
+      const alertMessage = safeMessageMap[code]
+      setUploadDebugInfo({
+        time: new Date().toISOString(),
+        code,
+        message: alertMessage,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+        errorMessage: error instanceof Error ? error.message : String(error),
+        fileName: file.name,
+        fileSize: file.size,
+        fileType: file.type || 'unknown',
+        userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
+      })
+      window.alert(alertMessage)
     } finally {
       setIsParsing(false)
     }
@@ -661,6 +686,12 @@ function App() {
               <div className="progressBarIndeterminate" />
             </div>
           </div>
+        )}
+        {uploadDebugInfo && (
+          <details className="uploadDebugPanel">
+            <summary>업로드 실패 진단 정보</summary>
+            <pre>{JSON.stringify(uploadDebugInfo, null, 2)}</pre>
+          </details>
         )}
       </section>
       )}
