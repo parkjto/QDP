@@ -150,6 +150,8 @@ const isNoiseLine = (line: string): boolean => {
 const normalizeBlock = (value: string): string =>
   value
     .replace(/[ \t]+/g, ' ')
+    // PDF 추출 시 단어 중간에 "시스 , 템"처럼 비정상 쉼표가 끼는 경우를 복구
+    .replace(/([가-힣A-Za-z0-9])\s+,\s+([가-힣A-Za-z0-9])/g, '$1$2')
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => !isNoiseLine(line))

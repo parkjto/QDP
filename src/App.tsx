@@ -3,8 +3,6 @@ import {
   extractTextFromPdf,
   parseQuestionsFromPdfText,
   parseQuestionsFromPdfFile,
-  PdfParseError,
-  type PdfErrorCode,
 } from './features/pdf/parser'
 import {
   collectWrongAnswers,
@@ -23,8 +21,8 @@ import {
   toggleBookmark,
   upsertQuestionBundle,
 } from './utils/storage'
+import { calculatePassProbability } from './utils/analytics'
 
-type StudyMode = 'normal' | 'wrongOnly'
 type ScreenStep = 'home' | 'library' | 'setup' | 'quiz' | 'review' | 'analytics' | 'mypage' | 'result'
 type MyPageView = 'main' | 'terms' | 'privacy' | 'cache' | 'oss'
 interface QuizResultSummary {
@@ -34,6 +32,7 @@ interface QuizResultSummary {
   elapsedSeconds: number
 }
 type AnalyticsRange = '7d' | '30d' | 'all'
+type AnalyticsMode = 'live' | 'stress'
 type SubjectId = 1 | 2 | 3 | 4 | 5
 
 const SUBJECT_LABELS: Record<SubjectId, string> = {
@@ -55,8 +54,6 @@ function App() {
   const [draftAnswers, setDraftAnswers] = useState<Record<string, number>>({})
   const [wrongAnswers, setWrongAnswers] = useState(loadWrongAnswers())
   const [bookmarks, setBookmarks] = useState(loadBookmarks())
-  const [studyMode, setStudyMode] = useState<StudyMode | null>(null)
-  const [chunkSize, setChunkSize] = useState<SessionConfig['chunkSize'] | null>(null)
   const [order, setOrder] = useState<SessionConfig['order'] | null>(null)
   const [selectedFileName, setSelectedFileName] = useState('')
   const [selectedFileSize, setSelectedFileSize] = useState('')
@@ -71,8 +68,8 @@ function App() {
   const [quizResult, setQuizResult] = useState<QuizResultSummary | null>(null)
   const [timerNow, setTimerNow] = useState<number>(Date.now())
   const [analyticsRange, setAnalyticsRange] = useState<AnalyticsRange>('all')
+  const [analyticsMode, setAnalyticsMode] = useState<AnalyticsMode>('live')
   const [figureByQuestionId, setFigureByQuestionId] = useState<Record<string, string>>({})
-  const [uploadNotice, setUploadNotice] = useState('')
   const [librarySort, setLibrarySort] = useState<'recent' | 'oldest' | 'name' | 'count'>('recent')
 
   const selectedBundle = useMemo(
@@ -131,10 +128,7 @@ function App() {
   const canStartQuiz =
     Boolean(selectedBundle) &&
     questions.length > 0 &&
-    Boolean(studyMode) &&
-    Boolean(chunkSize) &&
-    Boolean(order) &&
-    (studyMode === 'normal' || wrongQuestionCount > 0)
+    Boolean(order)
   const hasBundles = bundles.length > 0
   const currentQuestion = useMemo(() => {
     if (!session) return null
@@ -203,7 +197,6 @@ function App() {
   const uploadPdf = async (file: File): Promise<void> => {
     try {
       setIsParsing(true)
-      setUploadNotice('')
       let parsed = await parseQuestionsFromPdfFile(file, file.name)
       if (!parsed.length) {
         const fallbackText = await extractTextFromPdf(file)
@@ -231,22 +224,9 @@ function App() {
       setBundles(upsertQuestionBundle(bundle))
       setFigureByQuestionId((prev) => ({ ...prev, ...nextFigureByQuestionId }))
       setSelectedBundleId(bundle.id)
-      setStudyMode(null)
-      setChunkSize(null)
       setOrder(null)
-      setUploadNotice(`"${file.name}" 문제집이 추가되었습니다.`)
       setScreen('home')
-    } catch (error) {
-      const code: PdfErrorCode =
-        error instanceof PdfParseError ? error.code : 'PARSE_FAILED'
-      const safeMessageMap: Record<PdfErrorCode, string> = {
-        INVALID_TYPE: 'PDF 파일만 업로드할 수 있어요.',
-        TOO_LARGE: '파일이 너무 커요. 최대 20MB 파일을 업로드해 주세요.',
-        INVALID_PDF: '유효한 PDF 파일이 아니에요.',
-        MALFORMED_PDF: '파일을 읽을 수 없어요. 다른 PDF로 다시 시도해 주세요.',
-        PARSE_FAILED: '문제를 추출하지 못했어요. 다른 PDF로 다시 시도해 주세요.',
-      }
-      setUploadNotice(safeMessageMap[code])
+    } catch {
     } finally {
       setIsParsing(false)
     }
@@ -258,20 +238,16 @@ function App() {
     }
     if (!questions.length) return
 
-    if (!studyMode || !chunkSize || !order) {
+    if (!order) {
       return
     }
-
-    const sourceQuestions =
-      studyMode === 'wrongOnly'
-        ? questions.filter((question) => wrongQuestionIds.has(question.id))
-        : questions
+    const sourceQuestions = questions
 
     if (!sourceQuestions.length) {
       return
     }
 
-    const config: SessionConfig = { order, chunkSize }
+    const config: SessionConfig = { order, chunkSize: 'all' }
     const prepared = createSession(sourceQuestions, config)
     setSession(prepared)
     setSessionBundleId(selectedBundle.id)
@@ -297,13 +273,16 @@ function App() {
   }
 
   const moveToNextQuestion = (): void => {
-    if (!session || !currentQuestion || !isAnswerChecked) return
+    if (!session || !currentQuestion) return
     const selected = draftAnswers[currentQuestion.id]
-    if (selected === undefined) return
 
+    const updatedAnswers =
+      selected === undefined
+        ? session.answers
+        : { ...session.answers, [currentQuestion.id]: selected }
     const updatedSession: SessionState = {
       ...session,
-      answers: { ...session.answers, [currentQuestion.id]: selected },
+      answers: updatedAnswers,
     }
 
     const nextIndex = updatedSession.currentIndex + 1
@@ -376,8 +355,6 @@ function App() {
     setSessionQuestions([])
     setDraftAnswers({})
     setFigureByQuestionId({})
-    setStudyMode(null)
-    setChunkSize(null)
     setOrder(null)
     setIsAnswerChecked(false)
     setIsCurrentAnswerCorrect(null)
@@ -526,20 +503,30 @@ function App() {
     })
   }, [bundles, analyticsWrongAnswers])
 
-  const analyticsAverageScore = analyticsSubjectScores.length
+  const displayedAnalyticsSubjectScores = useMemo(() => {
+    if (analyticsMode === 'live') return analyticsSubjectScores
+    return [
+      { subjectId: 1, label: SUBJECT_LABELS[1], wrongCount: 13, totalCount: 20, estimatedScore: 35 },
+      { subjectId: 2, label: SUBJECT_LABELS[2], wrongCount: 2, totalCount: 20, estimatedScore: 90 },
+      { subjectId: 3, label: SUBJECT_LABELS[3], wrongCount: 10, totalCount: 20, estimatedScore: 50 },
+      { subjectId: 4, label: SUBJECT_LABELS[4], wrongCount: 6, totalCount: 20, estimatedScore: 70 },
+      { subjectId: 5, label: SUBJECT_LABELS[5], wrongCount: 12, totalCount: 20, estimatedScore: 40 },
+    ]
+  }, [analyticsMode, analyticsSubjectScores])
+
+  const analyticsAverageScore = displayedAnalyticsSubjectScores.length
     ? Math.round(
-        analyticsSubjectScores.reduce((sum, metric) => sum + metric.estimatedScore, 0) /
-          analyticsSubjectScores.length,
+        displayedAnalyticsSubjectScores.reduce((sum, metric) => sum + metric.estimatedScore, 0) /
+          displayedAnalyticsSubjectScores.length,
       )
     : 0
-  const analyticsFailSubjects = analyticsSubjectScores.filter((metric) => metric.estimatedScore < 40)
-  const analyticsPassProbability = Math.max(
-    0,
-    Math.min(100, Math.round(analyticsAverageScore * 0.75 - analyticsFailSubjects.length * 8 + 20)),
+  const analyticsFailSubjects = displayedAnalyticsSubjectScores.filter((metric) => metric.estimatedScore < 40)
+  const analyticsPassProbability = calculatePassProbability(
+    displayedAnalyticsSubjectScores.map((metric) => metric.estimatedScore),
   )
-  const weakestAnalyticsSubject = analyticsSubjectScores.reduce(
+  const weakestAnalyticsSubject = displayedAnalyticsSubjectScores.reduce(
     (prev, curr) => (curr.estimatedScore < prev.estimatedScore ? curr : prev),
-    analyticsSubjectScores[0],
+    displayedAnalyticsSubjectScores[0],
   )
 
   const radar = useMemo(() => {
@@ -547,7 +534,7 @@ function App() {
     const cy = 140
     const radius = 88
     const levels = [20, 40, 60, 80, 100]
-    const count = analyticsSubjectScores.length
+    const count = displayedAnalyticsSubjectScores.length
     const angleAt = (index: number) => (-Math.PI / 2) + (index * 2 * Math.PI) / count
     const point = (score: number, index: number) => {
       const ratio = score / 100
@@ -557,26 +544,29 @@ function App() {
         y: cy + Math.sin(angle) * radius * ratio,
       }
     }
-    const axisEnds = analyticsSubjectScores.map((_, idx) => point(100, idx))
-    const polygonPoints = analyticsSubjectScores
+    const axisEnds = displayedAnalyticsSubjectScores.map((_, idx) => point(100, idx))
+    const polygonPoints = displayedAnalyticsSubjectScores
       .map((metric, idx) => point(metric.estimatedScore, idx))
       .map((p) => `${p.x},${p.y}`)
       .join(' ')
+    const valuePoints = displayedAnalyticsSubjectScores.map((metric, idx) =>
+      point(metric.estimatedScore, idx),
+    )
     const gridPolygons = levels.map((level) =>
-      analyticsSubjectScores
+      displayedAnalyticsSubjectScores
         .map((_, idx) => point(level, idx))
         .map((p) => `${p.x},${p.y}`)
         .join(' '),
     )
-    const labels = analyticsSubjectScores.map((metric, idx) => {
+    const labels = displayedAnalyticsSubjectScores.map((metric, idx) => {
       const p = point(112, idx)
       return { ...p, text: metric.label.replace(/^\d과목\s*/, ''), score: metric.estimatedScore }
     })
-    return { cx, cy, axisEnds, polygonPoints, gridPolygons, labels }
-  }, [analyticsSubjectScores])
+    return { cx, cy, axisEnds, polygonPoints, valuePoints, gridPolygons, labels }
+  }, [displayedAnalyticsSubjectScores])
 
   return (
-    <main className="app">
+    <main className={`app ${screen === 'quiz' ? 'appQuiz' : ''}`}>
       {screen !== 'quiz' && (
         <header className="topScreenBar" aria-label="현재 화면">
           <h1>{topScreenTitle}</h1>
@@ -584,7 +574,7 @@ function App() {
       )}
 
       {screen === 'home' && (
-      <section className="card">
+      <section className="card homeUploadCard">
         <label className="uploadField dashedDropzone" htmlFor="pdf-file-input">
           <div className="dropzoneContent">
             <div className="dropzoneIcon" aria-hidden="true">
@@ -632,7 +622,6 @@ function App() {
             </div>
           </div>
         )}
-        {uploadNotice && <p className="uploadNotice" aria-live="polite">{uploadNotice}</p>}
       </section>
       )}
 
@@ -689,8 +678,6 @@ function App() {
 
       {screen === 'library' && (
       <section className="card">
-        <p className="cardDescription">업로드한 문제집을 선택하고 문제풀이 또는 복습으로 이동하세요.</p>
-
         {hasBundles ? (
           <>
             <div className="librarySectionHeader">
@@ -798,67 +785,6 @@ function App() {
           </div>
           <div className="options">
             <fieldset className="optionGroup optionGridTwo">
-              <legend className="fieldTitle">학습 타입</legend>
-              <label className="optionCard optionCardLibrary">
-                <input
-                  type="radio"
-                  name="studyMode"
-                  checked={studyMode === 'normal'}
-                  onChange={() => setStudyMode('normal')}
-                />
-                <span className="optionTextGroup">
-                  <span className="optionTitle">문제 풀기</span>
-                  <span className="optionMeta">기본 모드로 전체 문제를 풉니다.</span>
-                </span>
-              </label>
-              <label className="optionCard optionCardLibrary">
-                <input
-                  type="radio"
-                  name="studyMode"
-                  checked={studyMode === 'wrongOnly'}
-                  disabled={wrongQuestionCount === 0}
-                  onChange={() => {
-                    if (wrongQuestionCount === 0) return
-                    setStudyMode('wrongOnly')
-                  }}
-                />
-                <span className="optionTextGroup">
-                  <span className="optionTitle">오답풀기</span>
-                  <span className="optionMeta">
-                    {wrongQuestionCount === 0
-                      ? '아직 오답이 없어 선택할 수 없습니다.'
-                      : `누적 오답 ${wrongQuestionCount}문제만 다시 풉니다.`}
-                  </span>
-                </span>
-              </label>
-            </fieldset>
-
-            <fieldset className="optionGroup optionGridTwo">
-              <legend className="fieldTitle">문제 수</legend>
-              <label className="optionCard optionCardLibrary">
-                <input type="radio" name="chunkSize" checked={chunkSize === 1} onChange={() => setChunkSize(1)} />
-                <span className="optionTextGroup">
-                  <span className="optionTitle">1문제</span>
-                  <span className="optionMeta">짧게 빠르게 풉니다.</span>
-                </span>
-              </label>
-              <label className="optionCard optionCardLibrary">
-                <input type="radio" name="chunkSize" checked={chunkSize === 5} onChange={() => setChunkSize(5)} />
-                <span className="optionTextGroup">
-                  <span className="optionTitle">5문제</span>
-                  <span className="optionMeta">집중 모드로 풉니다.</span>
-                </span>
-              </label>
-              <label className="optionCard optionCardLibrary">
-                <input type="radio" name="chunkSize" checked={chunkSize === 'all'} onChange={() => setChunkSize('all')} />
-                <span className="optionTextGroup">
-                  <span className="optionTitle">전체풀기</span>
-                  <span className="optionMeta">선택 문제집의 전체 문항을 풉니다.</span>
-                </span>
-              </label>
-            </fieldset>
-
-            <fieldset className="optionGroup optionGridTwo">
               <legend className="fieldTitle">출제 순서</legend>
               <label className="optionCard optionCardLibrary">
                 <input type="radio" name="order" checked={order === 'sequential'} onChange={() => setOrder('sequential')} />
@@ -885,7 +811,6 @@ function App() {
 
       {hasBundles && session && screen === 'quiz' && (
         <section className="card quizCard">
-          <h2>문제 풀이</h2>
           <div className="quizProgressHeader">
             <div className="quizTopRow">
               <div className="quizTopLeft">
@@ -924,21 +849,32 @@ function App() {
                 </span>
                 <button
                   type="button"
-                  className="checkInlineButton"
+                  className={`checkInlineButton ${isAnswerChecked ? 'checked' : ''}`}
                   disabled={isAnswerChecked || !currentQuestion || draftAnswers[currentQuestion.id] === undefined}
                   onClick={checkCurrentAnswer}
+                  aria-label={
+                    isAnswerChecked
+                      ? currentQuestion?.answer === undefined
+                        ? '정답 정보 없음'
+                        : `정답 ${currentQuestion.answer + 1}번`
+                      : '정답 확인'
+                  }
                 >
-                  정답 확인
+                  {isAnswerChecked
+                    ? currentQuestion?.answer === undefined
+                      ? '-'
+                      : `${currentQuestion.answer + 1}`
+                    : '정답 확인'}
                 </button>
               </div>
             </div>
             <div className="progressMeta">
-              <span>진행도 {currentStep} / {totalQuestionsInSession}</span>
-              <span>{progressPercent}%</span>
+              <span className="progressMetaText">진행도 {currentStep} / {totalQuestionsInSession}</span>
+              <span className="progressMetaPercent">{progressPercent}%</span>
             </div>
-          </div>
-          <div className="quizProgressTrack">
-            <div className="quizProgressFill" style={{ width: `${progressPercent}%` }} />
+            <div className="quizProgressTrack">
+              <div className="quizProgressFill" style={{ width: `${progressPercent}%` }} />
+            </div>
           </div>
           {currentQuestion && (
             <article key={currentQuestion.id} className="question">
@@ -979,23 +915,9 @@ function App() {
                   </label>
                 ))}
               </div>
-              {isAnswerChecked && (
-                <>
-                  {isCurrentAnswerCorrect === null ? (
-                    <p className="resultBadge unknown">i 정답 정보가 없는 문제입니다.</p>
-                  ) : (
-                    <p className={`resultBadge ${isCurrentAnswerCorrect ? 'correct' : 'wrong'}`}>
-                      {isCurrentAnswerCorrect
-                        ? 'V 정답입니다. 다음 문제를 누르면 진행합니다.'
-                        : 'X 오답입니다. 정답을 확인하고 다음 문제를 눌러 진행하세요.'}
-                    </p>
-                  )}
-                </>
-              )}
             </article>
           )}
           <div className="quizActionBar">
-            <div className="quizActionCaption">빠른 선택</div>
             <div className="choiceQuickRow">
               <button
                 type="button"
@@ -1025,7 +947,7 @@ function App() {
                 className="quickArrowButton"
                 aria-label="다음 문제"
                 onClick={moveToNextQuestion}
-                disabled={!isAnswerChecked}
+                disabled={!currentQuestion}
               >
                 →
               </button>
@@ -1089,11 +1011,13 @@ function App() {
             </div>
             <div className="explanationSheetBody">
               {currentQuestion.answer === undefined ? (
-                <p>이 문항은 정답 데이터가 없어 상세 해설을 제공할 수 없습니다.</p>
+                <p className="explanationEmpty">이 문항은 정답 데이터가 없어 상세 해설을 제공할 수 없습니다.</p>
               ) : (
                 <>
-                  <p>정답: <strong>{currentQuestion.answer + 1}번</strong></p>
-                  <p>{currentQuestion.choices[currentQuestion.answer]}</p>
+                  <p className="explanationAnswer">
+                    정답 <strong>{currentQuestion.answer + 1}번</strong>
+                  </p>
+                  <p className="explanationAnswerText">{currentQuestion.choices[currentQuestion.answer]}</p>
                   <p className="explanationHint">
                     오답 선택지를 비교해 핵심 키워드를 정리하면 복습 효율이 높아집니다.
                   </p>
@@ -1106,7 +1030,6 @@ function App() {
 
       {screen === 'review' && (
         <section className="card">
-          <p className="cardDescription">오답과 책갈피 문항을 모아서 빠르게 다시 학습하세요.</p>
           <div className="reviewSummaryGrid">
             <button
               type="button"
@@ -1167,6 +1090,22 @@ function App() {
               전체
             </button>
           </div>
+          <div className="analyticsModeRow">
+            <button
+              type="button"
+              className={`analyticsModeButton ${analyticsMode === 'live' ? 'active' : ''}`}
+              onClick={() => setAnalyticsMode('live')}
+            >
+              실데이터
+            </button>
+            <button
+              type="button"
+              className={`analyticsModeButton ${analyticsMode === 'stress' ? 'active' : ''}`}
+              onClick={() => setAnalyticsMode('stress')}
+            >
+              테스트 데이터
+            </button>
+          </div>
 
           <div className="analyticsHeroCard light">
             <div className="analyticsTopSummary">
@@ -1176,12 +1115,8 @@ function App() {
                   <strong>{analyticsAverageScore}점</strong>
                 </div>
                 <div>
-                  <span>합격 확률</span>
-                  <strong>{analyticsPassProbability}%</strong>
-                </div>
-                <div>
                   <span>취약 과목</span>
-                  <strong>{weakestAnalyticsSubject?.label ?? '-'}</strong>
+                  <strong className="weakSubjectValue">{weakestAnalyticsSubject?.label ?? '-'}</strong>
                 </div>
               </div>
               <div className="analyticsDonutWrap compact">
@@ -1199,9 +1134,11 @@ function App() {
               </div>
             </div>
             <p className={`analyticsWarning ${weakestAnalyticsSubject && weakestAnalyticsSubject.estimatedScore < 60 ? 'danger' : 'safe'}`}>
-              {weakestAnalyticsSubject && weakestAnalyticsSubject.estimatedScore < 60
-                ? `⚠️ ${weakestAnalyticsSubject.label} 정답률이 낮습니다. 집중 학습이 필요합니다.`
-                : '✅ 현재 과락 위험은 낮습니다. 약한 과목 위주로 유지 학습하세요.'}
+              {analyticsFailSubjects.length > 0
+                ? `⚠️ 과락 위험! 40점 미만 과목이 ${analyticsFailSubjects.length}개 있습니다. 집중 학습이 필요합니다.`
+                : analyticsAverageScore < 60
+                  ? `💡 전체 평균이 ${analyticsAverageScore}점으로 합격선(60점) 미만입니다. 전 범위 복습이 필요합니다.`
+                  : '✅ 현재 과락 위험은 낮습니다. 약한 과목 위주로 유지 학습하세요.'}
             </p>
 
             <div className="analyticsVisualWrap">
@@ -1214,6 +1151,9 @@ function App() {
                     <line key={`axis-${idx}`} x1={radar.cx} y1={radar.cy} x2={p.x} y2={p.y} className="analyticsRadarAxis" />
                   ))}
                   <polygon points={radar.polygonPoints} className="analyticsRadarValue" />
+                  {radar.valuePoints.map((p, idx) => (
+                    <circle key={`point-${idx}`} cx={p.x} cy={p.y} r="3.2" className="analyticsRadarPoint" />
+                  ))}
                   {radar.labels.map((label, idx) => (
                     <g key={`label-${idx}`}>
                       <text x={label.x} y={label.y} textAnchor="middle" className="analyticsRadarLabel">
@@ -1228,17 +1168,25 @@ function App() {
               </div>
             </div>
 
+            <h3 className="analyticsSectionTitle">과목별 상세 분석</h3>
             <div className="analyticsBarList">
-              {analyticsSubjectScores.map((metric) => (
+              {displayedAnalyticsSubjectScores.map((metric) => (
                 <div key={metric.subjectId} className="analyticsBarRow">
                   <div className="analyticsBarLabel">
                     <span>{metric.label}</span>
                     <strong>{metric.estimatedScore}점</strong>
                   </div>
                   <div className="analyticsBarTrack">
-                    <div className="analyticsBarFill" style={{ width: `${metric.estimatedScore}%` }} />
+                    <div
+                      className={`analyticsBarFill ${metric.estimatedScore < 40 ? 'danger' : metric.estimatedScore === 40 ? 'warning' : ''}`}
+                      style={{ width: `${metric.estimatedScore}%` }}
+                    />
                   </div>
-                  <p className="analyticsBarMeta">오답 {metric.wrongCount} / 전체 {metric.totalCount}</p>
+                  <p className="analyticsBarMeta">
+                    맞힌 문제 {Math.max(metric.totalCount - metric.wrongCount, 0)} / {metric.totalCount}
+                    {' · '}
+                    오답 {metric.wrongCount}
+                  </p>
                 </div>
               ))}
             </div>
