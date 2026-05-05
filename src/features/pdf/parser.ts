@@ -1,4 +1,5 @@
 import type { Question } from '../../types'
+import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.mjs?url'
 
 const CHOICE_MARKERS = ['①', '②', '③', '④']
 const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024
@@ -399,8 +400,7 @@ const loadPdfRuntime = async (): Promise<{ isBrowser: boolean; pdfjs: any }> => 
     ? await import('pdfjs-dist')
     : await import('pdfjs-dist/legacy/build/pdf.mjs')
   if (isBrowser && 'GlobalWorkerOptions' in pdfjs) {
-    const workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString()
-    ;(pdfjs as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc = workerSrc
+    ;(pdfjs as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc = pdfWorkerSrc
   }
   return { isBrowser, pdfjs }
 }

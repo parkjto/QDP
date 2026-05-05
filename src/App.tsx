@@ -3,6 +3,8 @@ import {
   extractTextFromPdf,
   parseQuestionsFromPdfText,
   parseQuestionsFromPdfFile,
+  PdfParseError,
+  type PdfErrorCode,
 } from './features/pdf/parser'
 import {
   collectWrongAnswers,
@@ -230,7 +232,17 @@ function App() {
       setSelectedBundleId(bundle.id)
       setOrder(null)
       setScreen('home')
-    } catch {
+    } catch (error) {
+      const code: PdfErrorCode =
+        error instanceof PdfParseError ? error.code : 'PARSE_FAILED'
+      const safeMessageMap: Record<PdfErrorCode, string> = {
+        INVALID_TYPE: 'PDF 파일만 업로드할 수 있어요.',
+        TOO_LARGE: '파일이 너무 커요. 최대 20MB 파일을 업로드해 주세요.',
+        INVALID_PDF: '유효한 PDF 파일이 아니에요.',
+        MALFORMED_PDF: '파일을 읽을 수 없어요. 다른 PDF로 다시 시도해 주세요.',
+        PARSE_FAILED: '문제를 추출하지 못했어요. 다른 PDF로 다시 시도해 주세요.',
+      }
+      window.alert(safeMessageMap[code])
     } finally {
       setIsParsing(false)
     }
