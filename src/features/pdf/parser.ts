@@ -451,10 +451,27 @@ const readPdfPages = async (file: File): Promise<Array<{ text: string; image: st
   const { getDocument } = pdfjs
 
   const data = await file.arrayBuffer()
-  const loadingTask = getDocument({ data, stopAtErrors: true, isEvalSupported: false })
+  let loadingTask = getDocument({ data, stopAtErrors: true, isEvalSupported: false })
 
   try {
-    const pdf = await loadingTask.promise
+    let pdf: any
+    try {
+      pdf = await loadingTask.promise
+    } catch {
+      try {
+        await loadingTask.destroy()
+      } catch {
+        // ignore cleanup failure
+      }
+      // iOS/Safari 환경에서 worker 초기화가 실패할 수 있어 무워커 모드로 재시도
+      loadingTask = getDocument({
+        data,
+        stopAtErrors: true,
+        isEvalSupported: false,
+        disableWorker: true,
+      })
+      pdf = await loadingTask.promise
+    }
     const pageTexts: string[] = []
     const figurePageIndexes: number[] = []
 
