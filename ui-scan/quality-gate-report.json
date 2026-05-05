@@ -1,30 +1,30 @@
 {
   "ok": true,
-  "createdAt": "2026-04-26T08:59:05.486Z",
+  "createdAt": "2026-04-27T15:19:36.665Z",
   "results": [
     {
       "step": "pdf-parse",
       "command": "npm run scan:pdf",
       "code": 0,
-      "elapsedMs": 926
+      "elapsedMs": 527
     },
     {
       "step": "full-flow",
       "command": "npm run scan:flow",
       "code": 0,
-      "elapsedMs": 7075
+      "elapsedMs": 7024
     },
     {
       "step": "unit-test",
       "command": "npm run test",
       "code": 0,
-      "elapsedMs": 889
+      "elapsedMs": 910
     },
     {
       "step": "build",
       "command": "npm run build",
       "code": 0,
-      "elapsedMs": 1172
+      "elapsedMs": 1178
     }
   ]
 }

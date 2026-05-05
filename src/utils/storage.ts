@@ -1,7 +1,8 @@
-import type { QuestionBundle, WrongAnswerItem } from '../types'
+import type { BookmarkItem, QuestionBundle, WrongAnswerItem } from '../types'
 
 const QUESTION_BANK_KEY = 'pdfQuiz.questionBank.v2'
 const WRONG_NOTE_KEY = 'pdfQuiz.wrongAnswers.v1'
+const BOOKMARK_KEY = 'pdfQuiz.bookmarks.v1'
 
 const readJson = <T,>(key: string, fallback: T): T => {
   try {
@@ -71,5 +72,23 @@ export const reconcileWrongAnswers = (
 export const removeWrongAnswersByBundleId = (bundleId: string): WrongAnswerItem[] => {
   const next = loadWrongAnswers().filter((item) => item.bundleId !== bundleId)
   writeJson(WRONG_NOTE_KEY, next)
+  return next
+}
+
+export const loadBookmarks = (): BookmarkItem[] => readJson<BookmarkItem[]>(BOOKMARK_KEY, [])
+
+export const toggleBookmark = (bundleId: string, questionId: string): BookmarkItem[] => {
+  const prev = loadBookmarks()
+  const exists = prev.some((item) => item.bundleId === bundleId && item.questionId === questionId)
+  const next = exists
+    ? prev.filter((item) => !(item.bundleId === bundleId && item.questionId === questionId))
+    : [...prev, { bundleId, questionId, bookmarkedAt: new Date().toISOString() }]
+  writeJson(BOOKMARK_KEY, next)
+  return next
+}
+
+export const removeBookmarksByBundleId = (bundleId: string): BookmarkItem[] => {
+  const next = loadBookmarks().filter((item) => item.bundleId !== bundleId)
+  writeJson(BOOKMARK_KEY, next)
   return next
 }

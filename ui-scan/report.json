@@ -1,9 +1,6 @@
 {
   "ok": true,
-  "uploadDropzone": {
-    "width": 301,
-    "height": 277
-  },
+  "uploadDropzone": null,
   "startButton": null,
-  "hasQuizSection": false
+  "hasQuizSection": true
 }

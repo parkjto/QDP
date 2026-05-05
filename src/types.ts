@@ -5,6 +5,7 @@ export interface Question {
   number: number
   stem: string
   choices: string[]
+  figureImage?: string
   answer?: number
   sourceName: string
 }
@@ -17,7 +18,7 @@ export interface QuestionBundle {
 }
 
 export type QuestionOrder = 'sequential' | 'random'
-export type QuestionChunkSize = 1 | 5
+export type QuestionChunkSize = 1 | 5 | 'all'
 
 export interface SessionConfig {
   order: QuestionOrder
@@ -36,4 +37,10 @@ export interface WrongAnswerItem {
   questionId: string
   selected: number
   answeredAt: string
+}
+
+export interface BookmarkItem {
+  bundleId: string
+  questionId: string
+  bookmarkedAt: string
 }

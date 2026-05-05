@@ -19,8 +19,11 @@ export const createSession = (questions: Question[], config: SessionConfig): Ses
   }
 }
 
+const resolveChunkSize = (session: SessionState): number =>
+  session.config.chunkSize === 'all' ? session.questionIds.length : session.config.chunkSize
+
 export const getCurrentChunkIds = (session: SessionState): string[] =>
-  session.questionIds.slice(session.currentIndex, session.currentIndex + session.config.chunkSize)
+  session.questionIds.slice(session.currentIndex, session.currentIndex + resolveChunkSize(session))
 
 export const submitChunkAnswers = (
   session: SessionState,
@@ -28,7 +31,7 @@ export const submitChunkAnswers = (
 ): SessionState => ({
   ...session,
   answers: { ...session.answers, ...chunkAnswers },
-  currentIndex: Math.min(session.currentIndex + session.config.chunkSize, session.questionIds.length),
+  currentIndex: Math.min(session.currentIndex + resolveChunkSize(session), session.questionIds.length),
 })
 
 export const isSessionFinished = (session: SessionState): boolean =>

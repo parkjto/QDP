@@ -5,6 +5,8 @@ const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024
 const PDF_MAGIC_HEADER = '%PDF-'
 const MIN_STEM_LENGTH = 12
 const MAX_FALLBACK_QUESTIONS = 60
+const FIGURE_HINT_REGEX =
+  /(다음\s*(그래프|그림|도표)|아래\s*(그래프|그림|도표)|(?:다음|아래)\s*표\b|<그림>|도식|다이어그램)/i
 
 export type PdfErrorCode =
   | 'INVALID_TYPE'
@@ -156,22 +158,65 @@ const normalizeBlock = (value: string): string =>
     .trim()
 
 const splitByChoiceMarkers = (block: string): { stem: string; choices: string[] } | null => {
-  const i1 = block.indexOf('①')
-  const i2 = block.indexOf('②')
-  const i3 = block.indexOf('③')
-  const i4 = block.indexOf('④')
-  if ([i1, i2, i3, i4].some((idx) => idx < 0)) return null
-  if (!(i1 < i2 && i2 < i3 && i3 < i4)) return null
+  const indices = {
+    a: [...block.matchAll(/①/g)].map((match) => match.index ?? -1).filter((index) => index >= 0),
+    b: [...block.matchAll(/②/g)].map((match) => match.index ?? -1).filter((index) => index >= 0),
+    c: [...block.matchAll(/③/g)].map((match) => match.index ?? -1).filter((index) => index >= 0),
+    d: [...block.matchAll(/④/g)].map((match) => match.index ?? -1).filter((index) => index >= 0),
+  }
+  if (!indices.a.length || !indices.b.length || !indices.c.length || !indices.d.length) return null
+
+  let best: { i1: number; i2: number; i3: number; i4: number } | null = null
+  for (const i1 of indices.a) {
+    const i2 = indices.b.find((index) => index > i1)
+    if (i2 === undefined) continue
+    const i3 = indices.c.find((index) => index > i2)
+    if (i3 === undefined) continue
+    const i4 = indices.d.find((index) => index > i3)
+    if (i4 === undefined) continue
+    if (!best || i1 > best.i1) {
+      best = { i1, i2, i3, i4 }
+    }
+  }
+  if (!best) return null
 
   return {
-    stem: normalizeBlock(block.slice(0, i1)),
+    stem: normalizeBlock(block.slice(0, best.i1)),
     choices: [
-      normalizeBlock(block.slice(i1 + 1, i2)),
-      normalizeBlock(block.slice(i2 + 1, i3)),
-      normalizeBlock(block.slice(i3 + 1, i4)),
-      normalizeBlock(block.slice(i4 + 1)),
+      normalizeBlock(block.slice(best.i1 + 1, best.i2)),
+      normalizeBlock(block.slice(best.i2 + 1, best.i3)),
+      normalizeBlock(block.slice(best.i3 + 1, best.i4)),
+      normalizeBlock(block.slice(best.i4 + 1)),
     ],
   }
+}
+
+const splitByPartialChoiceMarkers = (block: string): { stem: string; choices: string[] } | null => {
+  const markerEntries = [...block.matchAll(/[①②③④]/g)].map((match) => ({
+    marker: match[0],
+    index: match.index ?? -1,
+  }))
+  const ordered = markerEntries.filter((entry) => entry.index >= 0)
+  if (ordered.length < 3) return null
+
+  const choices = ['', '', '', '']
+  const markerToIdx: Record<string, number> = { '①': 0, '②': 1, '③': 2, '④': 3 }
+  const first = ordered[0]
+  const stem = normalizeBlock(block.slice(0, first.index))
+
+  for (let i = 0; i < ordered.length; i += 1) {
+    const current = ordered[i]
+    const currentChoiceIdx = markerToIdx[current.marker]
+    const next = ordered[i + 1]
+    const end = next ? next.index : block.length
+    choices[currentChoiceIdx] = normalizeBlock(block.slice(current.index + 1, end))
+  }
+
+  const filled = choices.map(
+    (choice, idx) => choice || `${idx + 1}번 선택지는 원문 이미지/도표를 확인해 주세요.`,
+  )
+  if (!stem) return null
+  return { stem, choices: filled }
 }
 
 const splitByNumberedChoices = (block: string): { stem: string; choices: string[] } | null => {
@@ -196,11 +241,22 @@ const splitOptionsFromBlock = (block: string): { stem: string; choices: string[]
   const byMarker = splitByChoiceMarkers(block)
   if (byMarker) return byMarker
 
+  const relaxed = /(.*?)①([\s\S]*?)②([\s\S]*?)③([\s\S]*?)④([\s\S]*)/s.exec(block)
+  if (relaxed) {
+    return {
+      stem: normalizeBlock(relaxed[1]),
+      choices: [relaxed[2], relaxed[3], relaxed[4], relaxed[5]].map((choice) => normalizeBlock(choice)),
+    }
+  }
+
+  const partial = splitByPartialChoiceMarkers(block)
+  if (partial) return partial
+
   return splitByNumberedChoices(block)
 }
 
 const splitQuestionBlocksBySequence = (text: string): Array<{ number: number; block: string }> => {
-  const points = [...text.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s*/g)].map((match) => ({
+  const points = [...text.matchAll(/(?:^|[\s)])(\d{1,3})\.\s*/g)].map((match) => ({
     number: Number(match[1]),
     index: (match.index ?? 0) + match[0].lastIndexOf(match[1]),
   }))
@@ -299,20 +355,32 @@ const parseStructuredQuestions = (text: string, sourceName: string): Question[] 
   const questions: Question[] = []
 
   for (const { number, block } of blocks) {
-    const parsed = splitOptionsFromBlock(block)
-    if (!parsed || parsed.choices.some((choice) => !choice)) continue
+    const sanitizedBlock = block
+      .split(/(?:^|\n)\s*(?:\d+회\s*)?정답 및 해설[\s\S]*$/m)[0]
+      .trim()
+    const parsed = splitOptionsFromBlock(sanitizedBlock)
+    if (!parsed) continue
+    const filledChoices = parsed.choices.map((choice, idx) =>
+      choice || `${idx + 1}번 선택지는 원문 이미지/도표를 확인해 주세요.`,
+    )
 
     questions.push({
       id: `${sourceName}-${number}`,
       number,
       stem: parsed.stem,
-      choices: parsed.choices,
+      choices: filledChoices,
       answer: answerMap.get(number),
       sourceName,
     })
   }
 
-  return questions
+  const uniqueByNumber = new Map<number, Question>()
+  for (const question of questions) {
+    if (!uniqueByNumber.has(question.number)) {
+      uniqueByNumber.set(question.number, question)
+    }
+  }
+  return [...uniqueByNumber.values()].sort((a, b) => a.number - b.number)
 }
 
 const parseQuestions = (text: string, sourceName: string): Question[] => {
@@ -323,7 +391,52 @@ const parseQuestions = (text: string, sourceName: string): Question[] => {
   return generateFallbackQuestions(text, sourceName)
 }
 
-export const extractTextFromPdf = async (file: File): Promise<string> => {
+const loadPdfRuntime = async (): Promise<{ isBrowser: boolean; pdfjs: any }> => {
+  const isBrowser = typeof window !== 'undefined'
+  const pdfjs = isBrowser
+    ? await import('pdfjs-dist')
+    : await import('pdfjs-dist/legacy/build/pdf.mjs')
+  if (isBrowser && 'GlobalWorkerOptions' in pdfjs) {
+    const workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString()
+    ;(pdfjs as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc = workerSrc
+  }
+  return { isBrowser, pdfjs }
+}
+
+const renderPageImage = async (page: any): Promise<string | null> => {
+  if (typeof document === 'undefined') return null
+  const viewport = page.getViewport({ scale: 1.15 })
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return null
+  canvas.width = Math.max(1, Math.floor(viewport.width))
+  canvas.height = Math.max(1, Math.floor(viewport.height))
+  await page.render({ canvasContext: ctx, viewport }).promise
+  return canvas.toDataURL('image/jpeg', 0.58)
+}
+
+const extractQuestionNumbersInText = (text: string): number[] =>
+  [...text.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s*/g)].map((match) => Number(match[1]))
+
+const attachFigureImages = (
+  questions: Question[],
+  pageRecords: Array<{ text: string; image: string | null }>,
+): Question[] => {
+  const figureByNumber = new Map<number, string>()
+  for (const page of pageRecords) {
+    if (!page.image) continue
+    if (!FIGURE_HINT_REGEX.test(page.text)) continue
+    for (const number of extractQuestionNumbersInText(page.text)) {
+      if (!figureByNumber.has(number)) figureByNumber.set(number, page.image)
+    }
+  }
+  return questions.map((question) => ({
+    ...question,
+    figureImage: figureByNumber.get(question.number) ?? question.figureImage,
+  }))
+}
+
+const readPdfPages = async (file: File): Promise<Array<{ text: string; image: string | null }>> => {
   if (file.size > MAX_PDF_SIZE_BYTES) throw new PdfParseError('TOO_LARGE')
   if (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf') {
     throw new PdfParseError('INVALID_TYPE')
@@ -332,30 +445,43 @@ export const extractTextFromPdf = async (file: File): Promise<string> => {
   const header = new TextDecoder().decode(await file.slice(0, 5).arrayBuffer())
   if (header !== PDF_MAGIC_HEADER) throw new PdfParseError('INVALID_PDF')
 
-  const isBrowser = typeof window !== 'undefined'
-  const pdfjs = isBrowser
-    ? await import('pdfjs-dist')
-    : await import('pdfjs-dist/legacy/build/pdf.mjs')
+  const { isBrowser, pdfjs } = await loadPdfRuntime()
   const { getDocument } = pdfjs
 
-  if (isBrowser && 'GlobalWorkerOptions' in pdfjs) {
-    const workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString()
-    ;(pdfjs as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc = workerSrc
-  }
   const data = await file.arrayBuffer()
   const loadingTask = getDocument({ data, stopAtErrors: true, isEvalSupported: false })
 
   try {
     const pdf = await loadingTask.promise
-    let output = ''
+    const pageTexts: string[] = []
+    const figurePageIndexes: number[] = []
 
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum += 1) {
       const page = await pdf.getPage(pageNum)
       const content = await page.getTextContent()
-      const pageText = rebuildPageText(content.items)
-      output += `\n${pageText}`
+      const pageText = normalizeText(rebuildPageText(content.items))
+      pageTexts.push(pageText)
+      if (isBrowser && FIGURE_HINT_REGEX.test(pageText)) {
+        figurePageIndexes.push(pageNum - 1)
+      }
     }
-    return normalizeText(output)
+
+    const imagesByIndex = new Map<number, string>()
+    if (isBrowser) {
+      for (const pageIndex of figurePageIndexes) {
+        const page = await pdf.getPage(pageIndex + 1)
+        try {
+          const rendered = await renderPageImage(page as never)
+          if (rendered) imagesByIndex.set(pageIndex, rendered)
+        } catch {
+          // Image rendering failures should not block text parsing.
+        }
+      }
+    }
+    return pageTexts.map((text, index) => ({
+      text,
+      image: imagesByIndex.get(index) ?? null,
+    }))
   } catch {
     throw new PdfParseError('MALFORMED_PDF')
   } finally {
@@ -367,8 +493,20 @@ export const extractTextFromPdf = async (file: File): Promise<string> => {
   }
 }
 
+export const extractTextFromPdf = async (file: File): Promise<string> => {
+  const pages = await readPdfPages(file)
+  return normalizeText(pages.map((page) => page.text).join('\n'))
+}
+
 export const parseQuestionsFromPdfText = (text: string, sourceName: string): Question[] =>
   parseQuestions(normalizeText(text), sourceName)
+
+export const parseQuestionsFromPdfFile = async (file: File, sourceName: string): Promise<Question[]> => {
+  const pages = await readPdfPages(file)
+  const text = normalizeText(pages.map((page) => page.text).join('\n'))
+  const parsed = parseQuestions(text, sourceName)
+  return attachFigureImages(parsed, pages)
+}
 
 export const analyzePdfTextStructure = (
   text: string,
