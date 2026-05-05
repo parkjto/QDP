@@ -11,6 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "scan:flow": "node scripts/full-flow-scan.mjs",
+    "scan:deploy": "npm run build -- --base \"/QDP/\" && node scripts/verify-deploy-flow.mjs",
     "scan:pdf": "node --experimental-strip-types scripts/verify-pdf-parse.mjs",
     "quality:gate": "node scripts/quality-gate.mjs"
   },
