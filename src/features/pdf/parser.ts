@@ -444,14 +444,14 @@ const readPdfPages = async (file: File): Promise<Array<{ text: string; image: st
     throw new PdfParseError('INVALID_TYPE')
   }
 
-  const header = new TextDecoder().decode(await file.slice(0, 5).arrayBuffer())
-  if (header !== PDF_MAGIC_HEADER) throw new PdfParseError('INVALID_PDF')
+  const header = new TextDecoder().decode(await file.slice(0, 8).arrayBuffer())
+  if (!header.includes(PDF_MAGIC_HEADER)) throw new PdfParseError('INVALID_PDF')
 
   const { isBrowser, pdfjs } = await loadPdfRuntime()
   const { getDocument } = pdfjs
 
-  const data = await file.arrayBuffer()
-  let loadingTask = getDocument({ data, stopAtErrors: true, isEvalSupported: false })
+  const data = new Uint8Array(await file.arrayBuffer())
+  let loadingTask = getDocument({ data, stopAtErrors: false, isEvalSupported: false })
 
   try {
     let pdf: any
@@ -466,11 +466,27 @@ const readPdfPages = async (file: File): Promise<Array<{ text: string; image: st
       // iOS/Safari 환경에서 worker 초기화가 실패할 수 있어 무워커 모드로 재시도
       loadingTask = getDocument({
         data,
-        stopAtErrors: true,
+        stopAtErrors: false,
         isEvalSupported: false,
         disableWorker: true,
       })
-      pdf = await loadingTask.promise
+      try {
+        pdf = await loadingTask.promise
+      } catch {
+        try {
+          await loadingTask.destroy()
+        } catch {
+          // ignore cleanup failure
+        }
+        // Safari 일부 환경에서 옵션 조합에 따라 실패할 수 있어 마지막 완화 옵션 재시도
+        loadingTask = getDocument({
+          data,
+          stopAtErrors: false,
+          isEvalSupported: true,
+          disableWorker: true,
+        })
+        pdf = await loadingTask.promise
+      }
     }
     const pageTexts: string[] = []
     const figurePageIndexes: number[] = []
