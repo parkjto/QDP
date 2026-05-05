@@ -10,13 +10,16 @@ import {
 } from './features/quiz/engine'
 import type { QuestionBundle, SessionConfig, SessionState } from './types'
 import {
+  appendQuizAttempts,
   appendWrongAnswers,
   deleteQuestionBundle,
   loadBookmarks,
+  loadQuizAttempts,
   loadQuestionBundles,
   loadWrongAnswers,
   reconcileWrongAnswers,
   removeBookmarksByBundleId,
+  removeQuizAttemptsByBundleId,
   removeWrongAnswersByBundleId,
   toggleBookmark,
   upsertQuestionBundle,
@@ -53,6 +56,7 @@ function App() {
   const [sessionQuestions, setSessionQuestions] = useState<QuestionBundle['questions']>([])
   const [draftAnswers, setDraftAnswers] = useState<Record<string, number>>({})
   const [wrongAnswers, setWrongAnswers] = useState(loadWrongAnswers())
+  const [quizAttempts, setQuizAttempts] = useState(loadQuizAttempts())
   const [bookmarks, setBookmarks] = useState(loadBookmarks())
   const [order, setOrder] = useState<SessionConfig['order'] | null>(null)
   const [selectedFileName, setSelectedFileName] = useState('')
@@ -287,6 +291,21 @@ function App() {
 
     const nextIndex = updatedSession.currentIndex + 1
     if (nextIndex >= updatedSession.questionIds.length) {
+      const answeredAt = new Date().toISOString()
+      const attemptItems = Object.entries(updatedSession.answers).map(([questionId, answer]) => {
+        const question = questionById.get(questionId)
+        return {
+          bundleId: sessionBundleId,
+          questionId,
+          selected: answer,
+          correct: question?.answer !== undefined && question.answer === answer,
+          answeredAt,
+        }
+      })
+      if (attemptItems.length) {
+        const nextAttempts = appendQuizAttempts(attemptItems)
+        setQuizAttempts(nextAttempts)
+      }
       const wrongItems = collectWrongAnswers(updatedSession, sessionQuestions, sessionBundleId)
       appendWrongAnswers(wrongItems)
       const reconciled = reconcileWrongAnswers(sessionBundleId, updatedSession.questionIds, wrongItems)
@@ -349,6 +368,7 @@ function App() {
     setBundles([])
     setSelectedBundleId('')
     setWrongAnswers([])
+    setQuizAttempts([])
     setBookmarks([])
     setSession(null)
     setSessionBundleId('')
@@ -399,9 +419,11 @@ function App() {
 
     const nextBundles = deleteQuestionBundle(bundleId)
     const nextWrongAnswers = removeWrongAnswersByBundleId(bundleId)
+    const nextAttempts = removeQuizAttemptsByBundleId(bundleId)
     const nextBookmarks = removeBookmarksByBundleId(bundleId)
     setBundles(nextBundles)
     setWrongAnswers(nextWrongAnswers)
+    setQuizAttempts(nextAttempts)
     setBookmarks(nextBookmarks)
     setFigureByQuestionId((prev) =>
       Object.fromEntries(
@@ -458,13 +480,13 @@ function App() {
     return now - 30 * 24 * 60 * 60 * 1000
   }, [analyticsRange])
 
-  const analyticsWrongAnswers = useMemo(
+  const analyticsAttempts = useMemo(
     () =>
-      wrongAnswers.filter((item) => {
+      quizAttempts.filter((item) => {
         if (analyticsCutoff === 0) return true
         return new Date(item.answeredAt).getTime() >= analyticsCutoff
       }),
-    [wrongAnswers, analyticsCutoff],
+    [quizAttempts, analyticsCutoff],
   )
 
   const analyticsSubjectScores = useMemo(() => {
@@ -472,6 +494,7 @@ function App() {
       bundles.flatMap((bundle) => bundle.questions.map((question) => [question.id, question] as const)),
     )
     const wrongBySubject: Record<SubjectId, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }
+    const attemptBySubject: Record<SubjectId, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }
     const totalBySubject: Record<SubjectId, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 }
 
     for (const bundle of bundles) {
@@ -481,36 +504,41 @@ function App() {
       }
     }
 
-    for (const wrong of analyticsWrongAnswers) {
-      const question = questionMap.get(wrong.questionId)
+    for (const attempt of analyticsAttempts) {
+      const question = questionMap.get(attempt.questionId)
       if (!question) continue
       const subjectId = resolveSubjectId(question.number)
-      wrongBySubject[subjectId] += 1
+      attemptBySubject[subjectId] += 1
+      if (!attempt.correct) wrongBySubject[subjectId] += 1
     }
 
     return ([1, 2, 3, 4, 5] as SubjectId[]).map((subjectId) => {
       const wrongCount = wrongBySubject[subjectId]
+      const attemptCount = attemptBySubject[subjectId]
       const totalCount = totalBySubject[subjectId]
-      const wrongRate = totalCount > 0 ? wrongCount / totalCount : 0
-      const estimatedScore = Math.max(0, 100 - Math.round(wrongRate * 200))
+      const estimatedScore =
+        attemptCount > 0
+          ? Math.max(0, Math.round(((attemptCount - wrongCount) / attemptCount) * 100))
+          : 0
       return {
         subjectId,
         label: SUBJECT_LABELS[subjectId],
         wrongCount,
+        attemptCount,
         totalCount,
         estimatedScore,
       }
     })
-  }, [bundles, analyticsWrongAnswers])
+  }, [bundles, analyticsAttempts])
 
   const displayedAnalyticsSubjectScores = useMemo(() => {
     if (analyticsMode === 'live') return analyticsSubjectScores
     return [
-      { subjectId: 1, label: SUBJECT_LABELS[1], wrongCount: 13, totalCount: 20, estimatedScore: 35 },
-      { subjectId: 2, label: SUBJECT_LABELS[2], wrongCount: 2, totalCount: 20, estimatedScore: 90 },
-      { subjectId: 3, label: SUBJECT_LABELS[3], wrongCount: 10, totalCount: 20, estimatedScore: 50 },
-      { subjectId: 4, label: SUBJECT_LABELS[4], wrongCount: 6, totalCount: 20, estimatedScore: 70 },
-      { subjectId: 5, label: SUBJECT_LABELS[5], wrongCount: 12, totalCount: 20, estimatedScore: 40 },
+      { subjectId: 1, label: SUBJECT_LABELS[1], wrongCount: 13, attemptCount: 20, totalCount: 20, estimatedScore: 35 },
+      { subjectId: 2, label: SUBJECT_LABELS[2], wrongCount: 2, attemptCount: 20, totalCount: 20, estimatedScore: 90 },
+      { subjectId: 3, label: SUBJECT_LABELS[3], wrongCount: 10, attemptCount: 20, totalCount: 20, estimatedScore: 50 },
+      { subjectId: 4, label: SUBJECT_LABELS[4], wrongCount: 6, attemptCount: 20, totalCount: 20, estimatedScore: 70 },
+      { subjectId: 5, label: SUBJECT_LABELS[5], wrongCount: 12, attemptCount: 20, totalCount: 20, estimatedScore: 40 },
     ]
   }, [analyticsMode, analyticsSubjectScores])
 
@@ -1183,7 +1211,7 @@ function App() {
                     />
                   </div>
                   <p className="analyticsBarMeta">
-                    맞힌 문제 {Math.max(metric.totalCount - metric.wrongCount, 0)} / {metric.totalCount}
+                    맞힌 문제 {Math.max(metric.attemptCount - metric.wrongCount, 0)} / {metric.attemptCount}
                     {' · '}
                     오답 {metric.wrongCount}
                   </p>

@@ -1,8 +1,9 @@
-import type { BookmarkItem, QuestionBundle, WrongAnswerItem } from '../types'
+import type { BookmarkItem, QuestionBundle, QuizAttemptItem, WrongAnswerItem } from '../types'
 
 const QUESTION_BANK_KEY = 'pdfQuiz.questionBank.v2'
 const WRONG_NOTE_KEY = 'pdfQuiz.wrongAnswers.v1'
 const BOOKMARK_KEY = 'pdfQuiz.bookmarks.v1'
+const QUIZ_ATTEMPTS_KEY = 'pdfQuiz.quizAttempts.v1'
 
 const readJson = <T,>(key: string, fallback: T): T => {
   try {
@@ -90,5 +91,20 @@ export const toggleBookmark = (bundleId: string, questionId: string): BookmarkIt
 export const removeBookmarksByBundleId = (bundleId: string): BookmarkItem[] => {
   const next = loadBookmarks().filter((item) => item.bundleId !== bundleId)
   writeJson(BOOKMARK_KEY, next)
+  return next
+}
+
+export const loadQuizAttempts = (): QuizAttemptItem[] =>
+  readJson<QuizAttemptItem[]>(QUIZ_ATTEMPTS_KEY, [])
+
+export const appendQuizAttempts = (items: QuizAttemptItem[]): QuizAttemptItem[] => {
+  const next = [...loadQuizAttempts(), ...items]
+  writeJson(QUIZ_ATTEMPTS_KEY, next)
+  return next
+}
+
+export const removeQuizAttemptsByBundleId = (bundleId: string): QuizAttemptItem[] => {
+  const next = loadQuizAttempts().filter((item) => item.bundleId !== bundleId)
+  writeJson(QUIZ_ATTEMPTS_KEY, next)
   return next
 }

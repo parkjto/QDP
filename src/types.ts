@@ -44,3 +44,11 @@ export interface BookmarkItem {
   questionId: string
   bookmarkedAt: string
 }
+
+export interface QuizAttemptItem {
+  bundleId: string
+  questionId: string
+  selected: number
+  correct: boolean
+  answeredAt: string
+}
