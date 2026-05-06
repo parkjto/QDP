@@ -255,7 +255,13 @@ function App() {
         MALFORMED_PDF: '파일을 읽을 수 없어요. 다른 PDF로 다시 시도해 주세요.',
         PARSE_FAILED: '문제를 추출하지 못했어요. 다른 PDF로 다시 시도해 주세요.',
       }
-      const alertMessage = safeMessageMap[code]
+      const alertMessage =
+        code === 'PARSE_FAILED' &&
+        error instanceof Error &&
+        error.message &&
+        error.message !== code
+          ? error.message
+          : safeMessageMap[code]
       setUploadDebugInfo({
         time: new Date().toISOString(),
         code,

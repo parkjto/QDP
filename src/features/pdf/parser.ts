@@ -1,5 +1,4 @@
 import type { Question } from '../../types'
-import pdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.mjs?url'
 
 const CHOICE_MARKERS = ['①', '②', '③', '④']
 const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024
@@ -19,8 +18,8 @@ export type PdfErrorCode =
 export class PdfParseError extends Error {
   code: PdfErrorCode
 
-  constructor(code: PdfErrorCode) {
-    super(code)
+  constructor(code: PdfErrorCode, message?: string) {
+    super(message ?? code)
     this.name = 'PdfParseError'
     this.code = code
   }
@@ -111,6 +110,18 @@ const rebuildPageText = (items: unknown[]): string => {
 
   return rebuildLinearText(positioned)
 }
+
+const rebuildFallbackText = (items: unknown[]): string =>
+  items
+    .map((item) => {
+      if (!item || typeof item !== 'object' || !('str' in item)) return ''
+      const str = String((item as { str: string }).str ?? '').trim()
+      if (!str) return ''
+      const hasEol = Boolean((item as { hasEOL?: boolean }).hasEOL)
+      return hasEol ? `${str}\n` : `${str} `
+    })
+    .join('')
+    .trim()
 
 const parseAnswerMap = (text: string): Map<number, number> => {
   const answerMap = new Map<number, number>()
@@ -259,31 +270,15 @@ const splitOptionsFromBlock = (block: string): { stem: string; choices: string[]
 }
 
 const splitQuestionBlocksBySequence = (text: string): Array<{ number: number; block: string }> => {
-  const points = [...text.matchAll(/(?:^|[\s)])(\d{1,3})\.\s*/g)].map((match) => ({
+  const points = [...text.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s+/g)].map((match) => ({
     number: Number(match[1]),
     index: (match.index ?? 0) + match[0].lastIndexOf(match[1]),
   }))
   if (!points.length) return []
 
-  const accepted: Array<{ number: number; index: number }> = []
-  let expected = 1
-  for (const point of points) {
-    if (point.number !== expected) {
-      // allow restarting when a new exam section begins
-      if (expected > 50 && point.number === 1) {
-        expected = 1
-      } else {
-        continue
-      }
-    }
-    accepted.push(point)
-    expected += 1
-  }
-
-  if (!accepted.length) return []
-  return accepted.map((point, idx) => {
+  return points.map((point, idx) => {
     const start = point.index
-    const end = accepted[idx + 1]?.index ?? text.length
+    const end = points[idx + 1]?.index ?? text.length
     return {
       number: point.number,
       block: text.slice(start, end).replace(/^\d{1,3}\.\s*/, '').trim(),
@@ -378,8 +373,11 @@ const parseStructuredQuestions = (text: string, sourceName: string): Question[] 
   }
 
   const uniqueByNumber = new Map<number, Question>()
+  const qualityScore = (question: Question) =>
+    question.stem.length + question.choices.reduce((sum, choice) => sum + choice.length, 0)
   for (const question of questions) {
-    if (!uniqueByNumber.has(question.number)) {
+    const existing = uniqueByNumber.get(question.number)
+    if (!existing || qualityScore(question) > qualityScore(existing)) {
       uniqueByNumber.set(question.number, question)
     }
   }
@@ -394,13 +392,51 @@ const parseQuestions = (text: string, sourceName: string): Question[] => {
   return generateFallbackQuestions(text, sourceName)
 }
 
+const detectExpectedQuestionCount = (text: string): number => {
+  const answerMap = parseAnswerMap(text)
+  const answerMax = Math.max(0, ...answerMap.keys())
+  if (answerMap.size >= 60 && answerMax >= 80) return answerMax
+
+  const numberingMax = Math.max(
+    0,
+    ...[...text.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s+/g)].map((match) => Number(match[1])),
+  )
+  return numberingMax >= 80 ? numberingMax : 0
+}
+
+const ensureQuestionCompleteness = (questions: Question[], text: string): void => {
+  const expectedCount = detectExpectedQuestionCount(text)
+  if (expectedCount <= 0) return
+
+  const questionNums = new Set(questions.map((question) => question.number))
+  const missing: number[] = []
+  for (let n = 1; n <= expectedCount; n += 1) {
+    if (!questionNums.has(n)) missing.push(n)
+  }
+  if (!missing.length) return
+
+  const preview = missing.slice(0, 12).join(', ')
+  const suffix = missing.length > 12 ? ' ...' : ''
+  throw new PdfParseError(
+    'PARSE_FAILED',
+    `문항 누락 감지: 총 ${expectedCount}문항 중 ${missing.length}개 누락 (${preview}${suffix})`,
+  )
+}
+
 const loadPdfRuntime = async (): Promise<{ isBrowser: boolean; pdfjs: any }> => {
   const isBrowser = typeof window !== 'undefined'
   const pdfjs = isBrowser
     ? await import('pdfjs-dist')
     : await import('pdfjs-dist/legacy/build/pdf.mjs')
   if (isBrowser && 'GlobalWorkerOptions' in pdfjs) {
-    ;(pdfjs as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc = pdfWorkerSrc
+    let workerSrc = ''
+    try {
+      const workerModule = await import('pdfjs-dist/build/pdf.worker.mjs?url')
+      workerSrc = String((workerModule as { default?: string }).default ?? '')
+    } catch {
+      workerSrc = new URL('pdfjs-dist/build/pdf.worker.mjs', import.meta.url).toString()
+    }
+    ;(pdfjs as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc = workerSrc
   }
   return { isBrowser, pdfjs }
 }
@@ -426,7 +462,12 @@ const readPageTextSafely = async (page: any): Promise<string> => {
   for (const options of attempts) {
     try {
       const content = await page.getTextContent(options)
-      const text = normalizeText(rebuildPageText(content.items))
+      const primary = normalizeText(rebuildPageText(content.items))
+      const fallback = normalizeText(rebuildFallbackText(content.items))
+      const score = (value: string) =>
+        [...value.matchAll(/(?:^|\n)\s*\d{1,3}\.\s+/g)].length * 3 +
+        [...value.matchAll(/[①②③④]/g)].length
+      const text = score(primary) >= score(fallback) ? primary : fallback
       if (text) return text
     } catch {
       // try next extraction option
@@ -566,6 +607,7 @@ export const parseQuestionsFromPdfFile = async (file: File, sourceName: string):
   const pages = await readPdfPages(file)
   const text = normalizeText(pages.map((page) => page.text).join('\n'))
   const parsed = parseQuestions(text, sourceName)
+  ensureQuestionCompleteness(parsed, text)
   return attachFigureImages(parsed, pages)
 }
 
