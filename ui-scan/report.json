@@ -1,5 +1,6 @@
 {
-  "ok": false,
-  "stage": "upload-to-library",
-  "reason": "1. 2023년01회_정보처리기사필기기출문제.pdf"
+  "ok": true,
+  "uploadDropzone": null,
+  "startButton": null,
+  "hasQuizSection": true
 }

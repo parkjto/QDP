@@ -44,7 +44,13 @@ const main = async () => {
 
     await page.setInputFiles('#pdf-file-input', PDF_PATH)
     try {
-      await page.waitForSelector('.uploadNotice', { timeout: 120000 })
+      await page.waitForFunction(
+        () =>
+          document.querySelectorAll('.recentItem').length > 0 ||
+          document.querySelectorAll('.libraryBook').length > 0,
+        {},
+        { timeout: 120000 },
+      )
     } catch {
       const hint = (await page.locator('.dropzoneHint').first().innerText().catch(() => '')) ?? ''
       await failWithReport(page, 'upload-to-library', hint || '업로드 후 보관함 목록 갱신 실패')
@@ -54,19 +60,7 @@ const main = async () => {
     await page.getByRole('button', { name: '내 책장', exact: true }).click()
     await page.waitForSelector('.libraryShelf .libraryBook', { timeout: 10000 })
     await page.locator('.libraryShelf .libraryBook').first().click()
-    await page.waitForSelector('text=학습 타입', { timeout: 30000 })
-
-    const studyOption = page.getByText('문제 풀기', { exact: true })
-    if ((await studyOption.count()) === 0) {
-      await failWithReport(page, 'setup-study', '학습 타입 선택 옵션 미노출')
-    }
-    await studyOption.click()
-
-    const countOption = page.getByText('5문제', { exact: true })
-    if ((await countOption.count()) === 0) {
-      await failWithReport(page, 'setup-count', '문제 수 선택 옵션 미노출')
-    }
-    await countOption.click()
+    await page.waitForSelector('text=출제 순서', { timeout: 30000 })
 
     const orderOption = page.getByText('순차', { exact: true })
     if ((await orderOption.count()) === 0) {
@@ -81,7 +75,7 @@ const main = async () => {
     await startBtn.click()
 
     try {
-      await page.waitForSelector('text=문제 풀이', { timeout: 30000 })
+      await page.waitForSelector('.quizProgressHeader', { timeout: 30000 })
     } catch {
       await failWithReport(page, 'setup-to-quiz', '문제 풀이 화면 진입 실패')
     }
@@ -98,8 +92,7 @@ const main = async () => {
       }
       await page.waitForTimeout(250)
       await shot(page, `04-q${idx + 1}-checked`)
-      const nextBtn = page.getByRole('button', { name: '다음 문제', exact: true })
-      if ((await nextBtn.count()) === 0) break
+      const nextBtn = page.locator('.quickArrowButton[aria-label="다음 문제"]').first()
       await nextBtn.click()
       await page.waitForTimeout(250)
     }

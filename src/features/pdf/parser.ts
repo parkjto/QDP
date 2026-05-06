@@ -270,7 +270,8 @@ const splitOptionsFromBlock = (block: string): { stem: string; choices: string[]
 }
 
 const splitQuestionBlocksBySequence = (text: string): Array<{ number: number; block: string }> => {
-  const points = [...text.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s+/g)].map((match) => ({
+  const questionZone = text.split(/(?:^|\n)\s*(?:\d+회\s*)?정답\s*(?:및)?\s*해설[\s\S]*$/m)[0] ?? text
+  const points = [...questionZone.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s+/g)].map((match) => ({
     number: Number(match[1]),
     index: (match.index ?? 0) + match[0].lastIndexOf(match[1]),
   }))
@@ -278,10 +279,10 @@ const splitQuestionBlocksBySequence = (text: string): Array<{ number: number; bl
 
   return points.map((point, idx) => {
     const start = point.index
-    const end = points[idx + 1]?.index ?? text.length
+    const end = points[idx + 1]?.index ?? questionZone.length
     return {
       number: point.number,
-      block: text.slice(start, end).replace(/^\d{1,3}\.\s*/, '').trim(),
+      block: questionZone.slice(start, end).replace(/^\d{1,3}\.\s*/, '').trim(),
     }
   })
 }
@@ -357,7 +358,23 @@ const parseStructuredQuestions = (text: string, sourceName: string): Question[] 
       .split(/(?:^|\n)\s*(?:\d+회\s*)?정답 및 해설[\s\S]*$/m)[0]
       .trim()
     const parsed = splitOptionsFromBlock(sanitizedBlock)
-    if (!parsed) continue
+    if (!parsed) {
+      const recoveredStem = normalizeBlock(sanitizedBlock)
+      questions.push({
+        id: `${sourceName}-${number}`,
+        number,
+        stem: recoveredStem || `${number}번 문항 원문을 확인해 주세요.`,
+        choices: [
+          '1번 선택지 원문 복구 필요',
+          '2번 선택지 원문 복구 필요',
+          '3번 선택지 원문 복구 필요',
+          '4번 선택지 원문 복구 필요',
+        ],
+        answer: answerMap.get(number),
+        sourceName,
+      })
+      continue
+    }
     const filledChoices = parsed.choices.map((choice, idx) =>
       choice || `${idx + 1}번 선택지는 원문 이미지/도표를 확인해 주세요.`,
     )
@@ -379,6 +396,43 @@ const parseStructuredQuestions = (text: string, sourceName: string): Question[] 
     const existing = uniqueByNumber.get(question.number)
     if (!existing || qualityScore(question) > qualityScore(existing)) {
       uniqueByNumber.set(question.number, question)
+    }
+  }
+
+  const maxNumberFromAnswerMap = Math.max(0, ...answerMap.keys())
+  const numberingMax = Math.max(
+    0,
+    ...[...text.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s+/g)].map((match) => Number(match[1])),
+  )
+  const normalizedSourceName = sourceName.normalize('NFC')
+  const expectedCountFromSource =
+    /정보처리기사/.test(normalizedSourceName) || /(?:^|[^0-9])100문항/.test(text) ? 100 : 0
+  const safeNumberingMax = numberingMax >= 80 && numberingMax <= 130 ? numberingMax : 0
+  const expectedCount =
+    expectedCountFromSource > 0
+      ? expectedCountFromSource
+      : Math.max(maxNumberFromAnswerMap, safeNumberingMax)
+
+  // 누락 번호를 placeholder 문항으로 보강해 번호 누락을 방지
+  if (expectedCount > 0) {
+    for (const number of [...uniqueByNumber.keys()]) {
+      if (number > expectedCount) uniqueByNumber.delete(number)
+    }
+    for (let number = 1; number <= expectedCount; number += 1) {
+      if (uniqueByNumber.has(number)) continue
+      uniqueByNumber.set(number, {
+        id: `${sourceName}-${number}`,
+        number,
+        stem: `${number}번 문항 원문을 복구하지 못했습니다. PDF 원문을 확인해 주세요.`,
+        choices: [
+          '1번 선택지 원문 복구 필요',
+          '2번 선택지 원문 복구 필요',
+          '3번 선택지 원문 복구 필요',
+          '4번 선택지 원문 복구 필요',
+        ],
+        answer: answerMap.get(number),
+        sourceName,
+      })
     }
   }
   return [...uniqueByNumber.values()].sort((a, b) => a.number - b.number)
