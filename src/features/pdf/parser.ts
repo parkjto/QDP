@@ -417,6 +417,24 @@ const renderPageImage = async (page: any): Promise<string | null> => {
   return canvas.toDataURL('image/jpeg', 0.58)
 }
 
+const readPageTextSafely = async (page: any): Promise<string> => {
+  const attempts: Array<Record<string, unknown>> = [
+    {},
+    { disableNormalization: true },
+    { disableNormalization: true, includeMarkedContent: true },
+  ]
+  for (const options of attempts) {
+    try {
+      const content = await page.getTextContent(options)
+      const text = normalizeText(rebuildPageText(content.items))
+      if (text) return text
+    } catch {
+      // try next extraction option
+    }
+  }
+  return ''
+}
+
 const extractQuestionNumbersInText = (text: string): number[] =>
   [...text.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s*/g)].map((match) => Number(match[1]))
 
@@ -492,13 +510,21 @@ const readPdfPages = async (file: File): Promise<Array<{ text: string; image: st
     const figurePageIndexes: number[] = []
 
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum += 1) {
-      const page = await pdf.getPage(pageNum)
-      const content = await page.getTextContent()
-      const pageText = normalizeText(rebuildPageText(content.items))
-      pageTexts.push(pageText)
-      if (isBrowser && FIGURE_HINT_REGEX.test(pageText)) {
-        figurePageIndexes.push(pageNum - 1)
+      try {
+        const page = await pdf.getPage(pageNum)
+        const pageText = await readPageTextSafely(page)
+        pageTexts.push(pageText)
+        if (isBrowser && pageText && FIGURE_HINT_REGEX.test(pageText)) {
+          figurePageIndexes.push(pageNum - 1)
+        }
+      } catch {
+        // 페이지 단위 실패는 건너뛰고 다음 페이지를 계속 시도
+        pageTexts.push('')
       }
+    }
+
+    if (!pageTexts.some((text) => text.trim().length > 0)) {
+      throw new PdfParseError('MALFORMED_PDF')
     }
 
     const imagesByIndex = new Map<number, string>()
