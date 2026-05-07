@@ -1,32 +1,65 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ChangeEvent } from 'react'
+import {
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+  type User,
+} from 'firebase/auth'
 import {
   extractTextFromPdf,
   parseQuestionsFromPdfText,
   parseQuestionsFromPdfFile,
   PdfParseError,
+  questionNeedsFigureImageFallback,
+  getPdfPageCountFromBytes,
+  renderPdfPageIndexToDataUrl,
   type PdfErrorCode,
 } from './features/pdf/parser'
 import {
   collectWrongAnswers,
   createSession,
 } from './features/quiz/engine'
-import type { QuestionBundle, SessionConfig, SessionState } from './types'
+import type { LocalAppData, Question, QuestionBundle, SessionConfig, SessionState } from './types'
 import {
   appendQuizAttempts,
   appendWrongAnswers,
   deleteQuestionBundle,
+  loadFigureCache,
   loadBookmarks,
+  loadLocalAppData,
   loadQuizAttempts,
   loadQuestionBundles,
   loadWrongAnswers,
   reconcileWrongAnswers,
   removeBookmarksByBundleId,
+  replaceLocalAppData,
+  removeFigureCacheByBundleId,
   removeQuizAttemptsByBundleId,
   removeWrongAnswersByBundleId,
   toggleBookmark,
   upsertQuestionBundle,
 } from './utils/storage'
+import {
+  figureDbClearAll,
+  figureDbDeleteByBundlePrefix,
+  figureDbGetAll,
+  figureDbPutBatch,
+  migrateLegacyFigureCacheToIndexedDb,
+} from './utils/figureImageDb'
+import { pdfBlobDbClearAll, pdfBlobDbDelete, pdfBlobDbGet, pdfBlobDbPut } from './utils/pdfBlobDb'
 import { calculatePassProbability } from './utils/analytics'
+import { firebaseServices, isFirebaseEnabled } from './config/firebase'
+import { FIGURE_PIPELINE_VERSION } from './config/figurePipeline'
+import {
+  clearCloudSnapshot,
+  exportSnapshotToJson,
+  getSyncQuotaStatus,
+  importSnapshotFromJson,
+  mergeLocalAndRemoteData,
+  pullCloudSnapshot,
+  pushCloudSnapshot,
+} from './features/sync/firebaseSync'
 
 type ScreenStep = 'home' | 'library' | 'setup' | 'quiz' | 'review' | 'analytics' | 'mypage' | 'result'
 type MyPageView = 'main' | 'terms' | 'privacy' | 'cache' | 'oss'
@@ -50,6 +83,22 @@ interface UploadDebugInfo {
 type AnalyticsRange = '7d' | '30d' | 'all'
 type AnalyticsMode = 'live' | 'stress'
 type SubjectId = 1 | 2 | 3 | 4 | 5
+type SyncState = 'idle' | 'syncing' | 'ok' | 'error'
+const PLACEHOLDER_TEXT_PATTERN =
+  /원문 이미지\/도표|선택지 원문 복구 필요|원문을 복구하지 못했습니다|원문 복구 필요/
+const hasPlaceholderContent = (stem: string, choices: string[]): boolean =>
+  PLACEHOLDER_TEXT_PATTERN.test(stem) ||
+  choices.some((choice) => PLACEHOLDER_TEXT_PATTERN.test(choice))
+
+const resolvedQuestionFigureUrls = (
+  question: Question,
+  figureByQuestionId: Record<string, string>,
+): string[] => {
+  const fromBundle = question.figures?.map((figure) => figure.dataUrl).filter(Boolean) ?? []
+  if (fromBundle.length > 0) return fromBundle
+  const fallback = question.figureImage ?? figureByQuestionId[question.id]
+  return fallback ? [fallback] : []
+}
 
 const SUBJECT_LABELS: Record<SubjectId, string> = {
   1: '1과목 소프트웨어 설계',
@@ -87,8 +136,47 @@ function App() {
   const [timerNow, setTimerNow] = useState<number>(Date.now())
   const [analyticsRange, setAnalyticsRange] = useState<AnalyticsRange>('all')
   const [analyticsMode, setAnalyticsMode] = useState<AnalyticsMode>('live')
-  const [figureByQuestionId, setFigureByQuestionId] = useState<Record<string, string>>({})
+  const [figureByQuestionId, setFigureByQuestionId] = useState<Record<string, string>>(loadFigureCache())
   const [librarySort, setLibrarySort] = useState<'recent' | 'oldest' | 'name' | 'count'>('recent')
+  const [authUser, setAuthUser] = useState<User | null>(null)
+  const [syncState, setSyncState] = useState<SyncState>('idle')
+  const [syncPendingCount, setSyncPendingCount] = useState(0)
+  const [syncErrorCount, setSyncErrorCount] = useState(0)
+  const [lastSyncAt, setLastSyncAt] = useState('')
+  const [syncNotice, setSyncNotice] = useState('')
+  const [isAutoSyncOn, setIsAutoSyncOn] = useState(true)
+  const [isCloudHydrated, setIsCloudHydrated] = useState(false)
+  const [syncQuota, setSyncQuota] = useState(getSyncQuotaStatus())
+  const [lastSyncedSignature, setLastSyncedSignature] = useState('')
+  const cloudReady = Boolean(isFirebaseEnabled && firebaseServices.auth && firebaseServices.db)
+
+  useEffect(() => {
+    let active = true
+    void (async () => {
+      try {
+        await migrateLegacyFigureCacheToIndexedDb()
+        const merged = await figureDbGetAll()
+        if (!active) return
+        setFigureByQuestionId((prev) => ({ ...prev, ...merged }))
+      } catch {
+        // LS에 남아 있는 figure 캐시로도 1차 표시 가능
+      }
+    })()
+    return () => {
+      active = false
+    }
+  }, [])
+
+  const applyLocalDataToState = (data: LocalAppData): void => {
+    setBundles(data.bundles)
+    setWrongAnswers(data.wrongAnswers)
+    setBookmarks(data.bookmarks)
+    setQuizAttempts(data.quizAttempts)
+    setSelectedBundleId((prev) => {
+      if (prev && data.bundles.some((bundle) => bundle.id === prev)) return prev
+      return data.bundles[0]?.id ?? ''
+    })
+  }
 
   const selectedBundle = useMemo(
     () => bundles.find((bundle) => bundle.id === selectedBundleId) ?? bundles[0] ?? null,
@@ -112,7 +200,14 @@ function App() {
     return items
   }, [bundles, librarySort])
   const questions = selectedBundle?.questions ?? []
-  const questionById = useMemo(() => new Map(questions.map((question) => [question.id, question])), [questions])
+  const questionPoolForQuizUi = useMemo(
+    () => (sessionQuestions.length > 0 ? sessionQuestions : questions),
+    [sessionQuestions, questions],
+  )
+  const questionById = useMemo(
+    () => new Map(questionPoolForQuizUi.map((question) => [question.id, question])),
+    [questionPoolForQuizUi],
+  )
   const wrongQuestionIds = useMemo(
     () =>
       new Set(
@@ -148,11 +243,25 @@ function App() {
     questions.length > 0 &&
     Boolean(order)
   const hasBundles = bundles.length > 0
+  const localAppData = useMemo<LocalAppData>(
+    () => ({ bundles, wrongAnswers, bookmarks, quizAttempts }),
+    [bundles, wrongAnswers, bookmarks, quizAttempts],
+  )
+  const localDataSignature = useMemo(() => JSON.stringify(localAppData), [localAppData])
+  const localRecordCount =
+    bundles.length + wrongAnswers.length + bookmarks.length + quizAttempts.length
   const currentQuestion = useMemo(() => {
     if (!session) return null
     const currentId = session.questionIds[session.currentIndex]
     return currentId ? questionById.get(currentId) ?? null : null
   }, [session, questionById])
+
+  /** 풀이 세션 중 도표 원본 매핑(문항별 ID·페이지 수) — 선택된 책장과 다를 때도 동일 문제집을 가리켜야 함 */
+  const quizBundleForSession = useMemo(
+    () => bundles.find((bundle) => bundle.id === sessionBundleId) ?? null,
+    [bundles, sessionBundleId],
+  )
+
   const totalQuestionsInSession = session?.questionIds.length ?? 0
   const answeredCount = session ? Object.keys(session.answers).length : 0
   const currentStep = totalQuestionsInSession
@@ -173,6 +282,70 @@ function App() {
     }, 1000)
     return () => window.clearInterval(timer)
   }, [session, quizStartedAt])
+
+  /**
+   * 업로드 단계에서 페이지 래스터가 전부 실패한 경우 등, IndexedDB 에 보관한 원본 PDF 로
+   * 현재 문항에 필요한 페이지만 다시 렌더해 참고 이미지를 채운다(best-effort).
+   */
+  useEffect(() => {
+    if (screen !== 'quiz' || !session || !currentQuestion || !quizBundleForSession || !sessionBundleId)
+      return
+    if (!questionNeedsFigureImageFallback(currentQuestion)) return
+    const urls = resolvedQuestionFigureUrls(currentQuestion, figureByQuestionId)
+    if (urls.length > 0) return
+
+    let cancelled = false
+
+    void (async () => {
+      try {
+        const bytes = await pdfBlobDbGet(quizBundleForSession.id)
+        if (!bytes || cancelled) return
+
+        let tp = quizBundleForSession.pdfPageCount ?? null
+        if (tp === null || tp <= 0) {
+          tp = await getPdfPageCountFromBytes(bytes)
+        }
+        if (!tp || cancelled) return
+
+        const maxNum = Math.max(
+          1,
+          ...quizBundleForSession.questions.map((item) => item.number),
+        )
+        const pageGuess = Math.min(
+          tp,
+          Math.max(1, Math.floor(((currentQuestion.number - 1) * tp) / maxNum) + 1),
+        )
+
+        const dataUrl = await renderPdfPageIndexToDataUrl(bytes, pageGuess)
+        if (!dataUrl || cancelled) return
+
+        setFigureByQuestionId((prev) => {
+          if (prev[currentQuestion.id]) return prev
+          return { ...prev, [currentQuestion.id]: dataUrl }
+        })
+        await figureDbPutBatch({ [currentQuestion.id]: dataUrl }).catch(() => {
+          /* 무시 — 화면에는 메모리 캐시로 표시 가능 */
+        })
+      } catch {
+        /* 원본 미보관·렌더 실패 등은 무시 */
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- figure 채워진 뒤에는 urls 로 조기 종료
+  }, [
+    screen,
+    session?.questionIds.length,
+    session?.currentIndex,
+    currentQuestion?.id,
+    currentQuestion?.number,
+    sessionBundleId,
+    quizBundleForSession?.id,
+    quizBundleForSession?.questions.length,
+    quizBundleForSession?.pdfPageCount,
+  ])
 
   const elapsedSecondsLive = useMemo(() => {
     if (!quizStartedAt) return 0
@@ -212,26 +385,287 @@ function App() {
     setIsExplanationOpen(false)
   }, [currentQuestion?.id])
 
+  useEffect(() => {
+    if (!selectedBundle) return
+    const hasPlaceholderFigures = selectedBundle.questions.some((question) =>
+      questionNeedsFigureImageFallback(question),
+    )
+    if (!hasPlaceholderFigures) return
+
+    if ((selectedBundle.figurePipelineVersion ?? 0) < FIGURE_PIPELINE_VERSION) {
+      setSettingsNotice(
+        '도표 추출 로직이 갱신되었습니다. 이 문제집을 삭제하고 동일 PDF를 다시 업로드하면 다단 레이아웃 문항까지 더 안정적으로 보입니다.',
+      )
+      return
+    }
+
+    let cancelled = false
+    void (async () => {
+      try {
+        const blob = await pdfBlobDbGet(selectedBundle.id)
+        if (!cancelled && !blob) {
+          setSettingsNotice(
+            '원본 PDF가 이 기기에 없어 도표 일부만 복구될 수 있습니다. 문제집을 삭제한 뒤 동일 파일을 다시 업로드해 주세요.',
+          )
+        }
+      } catch {
+        /* ignore */
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [selectedBundle?.id, selectedBundle?.figurePipelineVersion, selectedBundle?.questions.length])
+
+  useEffect(() => {
+    if (!cloudReady || !firebaseServices.auth) return
+    const unsubscribe = onAuthStateChanged(firebaseServices.auth, (user) => {
+      setAuthUser(user)
+      if (!user) {
+        setIsCloudHydrated(false)
+        setSyncState('idle')
+      }
+    })
+    return unsubscribe
+  }, [cloudReady])
+
+  useEffect(() => {
+    if (!cloudReady || !authUser) return
+    let cancelled = false
+    const hydrate = async (): Promise<void> => {
+      try {
+        setSyncState('syncing')
+        const remote = await pullCloudSnapshot(authUser.uid)
+        if (!remote) {
+          if (!cancelled) {
+            setIsCloudHydrated(true)
+            setSyncState('ok')
+            setLastSyncedSignature(JSON.stringify(loadLocalAppData()))
+            setSyncQuota(getSyncQuotaStatus())
+            setSyncNotice('클라우드에 저장된 데이터가 없습니다. 현재 기기 데이터를 사용합니다.')
+          }
+          return
+        }
+        const merged = mergeLocalAndRemoteData(loadLocalAppData(), remote)
+        const replaced = replaceLocalAppData(merged)
+        if (!cancelled) {
+          applyLocalDataToState(replaced)
+          setLastSyncAt(remote.updatedAt)
+          setLastSyncedSignature(JSON.stringify(replaced))
+          setIsCloudHydrated(true)
+          setSyncState('ok')
+          setSyncQuota(getSyncQuotaStatus())
+          setSyncNotice('클라우드 동기화를 완료했습니다.')
+        }
+      } catch (error) {
+        if (cancelled) return
+        setSyncState('error')
+        setSyncErrorCount((prev) => prev + 1)
+        setSyncNotice(`동기화 초기화 실패 (SYNC-403): ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    void hydrate()
+    return () => {
+      cancelled = true
+    }
+  }, [cloudReady, authUser])
+
+  useEffect(() => {
+    if (!cloudReady || !authUser || !isAutoSyncOn || !isCloudHydrated) return
+    if (syncQuota.blocked) {
+      setIsAutoSyncOn(false)
+      setSyncState('error')
+      setSyncNotice('무료 보호모드로 자동 동기화를 중지했습니다. 내일 다시 시도하거나 JSON 백업을 사용해 주세요.')
+      return
+    }
+    if (localDataSignature === lastSyncedSignature) return
+    setSyncPendingCount(1)
+    const timer = window.setTimeout(async () => {
+      try {
+        setSyncState('syncing')
+        const snapshot = await pushCloudSnapshot(authUser.uid, localAppData)
+        setSyncState('ok')
+        setLastSyncAt(snapshot.updatedAt)
+        setLastSyncedSignature(localDataSignature)
+        setSyncQuota(getSyncQuotaStatus())
+        setSyncPendingCount(0)
+      } catch (error) {
+        setSyncState('error')
+        setSyncPendingCount(0)
+        setSyncErrorCount((prev) => prev + 1)
+        setSyncNotice(`자동 백업 실패 (SYNC-429): ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }, 5000)
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [cloudReady, authUser, isAutoSyncOn, isCloudHydrated, localAppData, localDataSignature, lastSyncedSignature, syncQuota.blocked])
+
+  const signInWithGoogle = async (): Promise<void> => {
+    if (!cloudReady || !firebaseServices.auth) {
+      setSyncNotice('Firebase 설정이 필요합니다. .env 환경변수를 먼저 설정해 주세요.')
+      return
+    }
+    try {
+      await signInWithPopup(firebaseServices.auth, new GoogleAuthProvider())
+      setSyncNotice('구글 로그인에 성공했습니다.')
+    } catch (error) {
+      setSyncState('error')
+      setSyncNotice(`로그인 실패 (SYNC-401): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  const signOutFromCloud = async (): Promise<void> => {
+    if (!firebaseServices.auth) return
+    await signOut(firebaseServices.auth)
+    setSyncNotice('로그아웃되었습니다. 로컬 모드로 전환됩니다.')
+  }
+
+  const backupNow = async (): Promise<void> => {
+    if (!authUser) {
+      setSyncNotice('로그인 후 백업할 수 있습니다.')
+      return
+    }
+    try {
+      setSyncState('syncing')
+      const snapshot = await pushCloudSnapshot(authUser.uid, loadLocalAppData())
+      setLastSyncAt(snapshot.updatedAt)
+      setLastSyncedSignature(JSON.stringify(loadLocalAppData()))
+      setSyncQuota(getSyncQuotaStatus())
+      setSyncState('ok')
+      setSyncPendingCount(0)
+      setSyncNotice('수동 백업이 완료되었습니다.')
+    } catch (error) {
+      setSyncState('error')
+      setSyncErrorCount((prev) => prev + 1)
+      setSyncNotice(`수동 백업 실패 (SYNC-500): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  const restoreFromCloud = async (): Promise<void> => {
+    if (!authUser) {
+      setSyncNotice('로그인 후 복원할 수 있습니다.')
+      return
+    }
+    try {
+      setSyncState('syncing')
+      const remote = await pullCloudSnapshot(authUser.uid)
+      setSyncQuota(getSyncQuotaStatus())
+      if (!remote) {
+        setSyncState('ok')
+        setSyncNotice('클라우드에 복원할 데이터가 없습니다.')
+        return
+      }
+      const hasLocalData = localRecordCount > 0
+      const overwrite =
+        hasLocalData &&
+        window.confirm('클라우드 데이터로 현재 기기 데이터를 덮어쓸까요?\n취소를 누르면 병합 복원을 수행합니다.')
+      const next = overwrite ? remote : mergeLocalAndRemoteData(loadLocalAppData(), remote)
+      const replaced = replaceLocalAppData(next)
+      applyLocalDataToState(replaced)
+      setLastSyncAt(remote.updatedAt)
+      setLastSyncedSignature(JSON.stringify(replaced))
+      setSyncState('ok')
+      setSyncNotice(overwrite ? '클라우드 데이터로 복원했습니다.' : '로컬/클라우드 데이터를 병합 복원했습니다.')
+    } catch (error) {
+      setSyncState('error')
+      setSyncErrorCount((prev) => prev + 1)
+      setSyncNotice(`복원 실패 (SYNC-502): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  const removeCloudBackup = async (): Promise<void> => {
+    if (!authUser) {
+      setSyncNotice('로그인 후 클라우드 데이터를 삭제할 수 있습니다.')
+      return
+    }
+    const ok = window.confirm('클라우드 백업 데이터를 삭제할까요?\n이 기기의 로컬 데이터는 삭제되지 않습니다.')
+    if (!ok) return
+    try {
+      await clearCloudSnapshot(authUser.uid)
+      setSyncQuota(getSyncQuotaStatus())
+      setSyncState('ok')
+      setSyncNotice('클라우드 백업 데이터를 삭제했습니다.')
+    } catch (error) {
+      setSyncState('error')
+      setSyncErrorCount((prev) => prev + 1)
+      setSyncNotice(`클라우드 삭제 실패 (SYNC-503): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  const exportJsonBackup = (): void => {
+    const json = exportSnapshotToJson(loadLocalAppData())
+    const blob = new Blob([json], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `qdf-backup-${new Date().toISOString().slice(0, 10)}.json`
+    anchor.click()
+    URL.revokeObjectURL(url)
+    setSyncNotice('JSON 백업 파일을 내보냈습니다.')
+  }
+
+  const importJsonBackup = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    try {
+      const text = await file.text()
+      const snapshot = importSnapshotFromJson(text)
+      const merged = mergeLocalAndRemoteData(loadLocalAppData(), snapshot)
+      const replaced = replaceLocalAppData(merged)
+      applyLocalDataToState(replaced)
+      setLastSyncedSignature(JSON.stringify(replaced))
+      setSyncNotice('JSON 백업 가져오기를 완료했습니다.')
+      if (authUser) void backupNow()
+    } catch (error) {
+      setSyncState('error')
+      setSyncErrorCount((prev) => prev + 1)
+      setSyncNotice(`JSON 가져오기 실패 (SYNC-504): ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  const syncStateLabel =
+    syncState === 'syncing'
+      ? '동기화 중'
+      : syncState === 'ok'
+        ? '동기화 완료'
+        : syncState === 'error'
+          ? '동기화 오류'
+          : '대기'
+
   const uploadPdf = async (file: File): Promise<void> => {
     try {
       setIsParsing(true)
       setUploadDebugInfo(null)
-      let parsed = await parseQuestionsFromPdfFile(file, file.name)
-      if (!parsed.length) {
-        const fallbackText = await extractTextFromPdf(file)
-        parsed = parseQuestionsFromPdfText(fallbackText, file.name)
+      const rawBytes = new Uint8Array(await file.arrayBuffer())
+      const fileForParse = new File([rawBytes], file.name, { type: file.type })
+
+      const { questions: parsed, totalPages } = await parseQuestionsFromPdfFile(fileForParse, file.name)
+      let finalQuestions = parsed
+      if (!finalQuestions.length) {
+        const fallbackText = await extractTextFromPdf(fileForParse)
+        finalQuestions = parseQuestionsFromPdfText(fallbackText, file.name)
       }
-      if (!parsed.length) throw new Error('문제 파싱 실패')
+      if (!finalQuestions.length) throw new Error('문제 파싱 실패')
+
       const bundleId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       const nextFigureByQuestionId: Record<string, string> = {}
-      const bundledQuestions = parsed.map((question) => {
+      const bundledQuestions = finalQuestions.map((question) => {
         const id = `${bundleId}-${question.number}`
-        if (question.figureImage) nextFigureByQuestionId[id] = question.figureImage
+        const cachedFigure =
+          question.figureImage ??
+          question.figures?.find((figure) => figure.dataUrl)?.dataUrl ??
+          undefined
+        if (cachedFigure) nextFigureByQuestionId[id] = cachedFigure
         return {
           ...question,
           id,
-          // Keep image in memory only to avoid localStorage quota issues.
+          // 이미지는 IndexedDB(pdfQuiz.figureImages.v1)에 저장해 localStorage 할당 초과 방지.
           figureImage: undefined,
+          figures: undefined,
+          hasFigure: question.hasFigure,
         }
       })
       const bundle: QuestionBundle = {
@@ -239,9 +673,34 @@ function App() {
         title: file.name,
         createdAt: new Date().toISOString(),
         questions: bundledQuestions,
+        pdfPageCount: totalPages > 0 ? totalPages : undefined,
+        figurePipelineVersion: FIGURE_PIPELINE_VERSION,
       }
+      const missingFigureRaster = bundledQuestions.some((question) => {
+        const key = `${bundleId}-${question.number}`
+        return questionNeedsFigureImageFallback(question) && !nextFigureByQuestionId[key]
+      })
+      if (missingFigureRaster) {
+        setSettingsNotice(
+          '도표 문항의 이미지가 비어 있습니다. 풀이 화면에서 원본 PDF로 다시 렌더를 시도합니다. 계속 비면 Chrome으로 재시도해 주세요.',
+        )
+      }
+
+      try {
+        await pdfBlobDbPut(bundleId, rawBytes)
+      } catch {
+        setSettingsNotice(
+          '업로드 PDF 원본을 IndexedDB에 저장하지 못했습니다. 도표 문항이 비면 디스크/사생활 보호 설정을 확인한 뒤 다시 업로드해 주세요.',
+        )
+      }
+
       setBundles(upsertQuestionBundle(bundle))
       setFigureByQuestionId((prev) => ({ ...prev, ...nextFigureByQuestionId }))
+      try {
+        await figureDbPutBatch(nextFigureByQuestionId)
+      } catch {
+        setSettingsNotice('문항 이미지 저장에 실패했습니다. 브라우저 저장 공간 또는 사생활 보호 모드를 확인하고 PDF를 다시 업로드해 주세요.')
+      }
       setSelectedBundleId(bundle.id)
       setOrder(null)
       setScreen('home')
@@ -398,6 +857,16 @@ function App() {
     )
     if (!ok) return
 
+    try {
+      await figureDbClearAll()
+    } catch {
+      // 무시 후 LS/SW 초기화로 계속 진행
+    }
+    try {
+      await pdfBlobDbClearAll()
+    } catch {
+      // ignore
+    }
     window.localStorage.clear()
     if ('caches' in window) {
       const keys = await caches.keys()
@@ -468,11 +937,14 @@ function App() {
     setWrongAnswers(nextWrongAnswers)
     setQuizAttempts(nextAttempts)
     setBookmarks(nextBookmarks)
-    setFigureByQuestionId((prev) =>
-      Object.fromEntries(
-        Object.entries(prev).filter(([questionId]) => !questionId.startsWith(`${bundleId}-`)),
-      ),
-    )
+    const nextFigures = removeFigureCacheByBundleId(bundleId)
+    setFigureByQuestionId(nextFigures)
+    void figureDbDeleteByBundlePrefix(bundleId).catch(() => {
+      /* ignore */
+    })
+    void pdfBlobDbDelete(bundleId).catch(() => {
+      /* ignore */
+    })
     setSelectedBundleId(nextBundles[0]?.id ?? '')
 
     if (sessionBundleId === bundleId) {
@@ -955,28 +1427,21 @@ function App() {
           </div>
           {currentQuestion && (
             <article key={currentQuestion.id} className="question">
-              {currentQuestion.figureImage && (
-                <div className="questionFigureWrap">
+              {resolvedQuestionFigureUrls(currentQuestion, figureByQuestionId).map((url, index) => (
+                <div key={`${currentQuestion.id}-fig-${index}`} className="questionFigureWrap">
                   <img
                     className="questionFigure"
-                    src={currentQuestion.figureImage}
-                    alt={`${currentQuestion.number}번 문항 참고 이미지`}
+                    src={url}
+                    alt={`${currentQuestion.number}번 문항 참고 이미지 ${index + 1}`}
                     loading="lazy"
                   />
                 </div>
-              )}
-              {!currentQuestion.figureImage && figureByQuestionId[currentQuestion.id] && (
-                <div className="questionFigureWrap">
-                  <img
-                    className="questionFigure"
-                    src={figureByQuestionId[currentQuestion.id]}
-                    alt={`${currentQuestion.number}번 문항 참고 이미지`}
-                    loading="lazy"
-                  />
-                </div>
-              )}
+              ))}
               <h3>
-                {currentQuestion.number}. {currentQuestion.stem}
+                {currentQuestion.number}.{' '}
+                {PLACEHOLDER_TEXT_PATTERN.test(currentQuestion.stem)
+                  ? '문항 이미지를 보고 정답을 선택하세요.'
+                  : currentQuestion.stem}
               </h3>
               <div className="choices">
                 {currentQuestion.choices.map((choice, idx) => (
@@ -988,10 +1453,21 @@ function App() {
                       disabled={isAnswerChecked}
                       onChange={() => setDraftAnswers((prev) => ({ ...prev, [currentQuestion.id]: idx }))}
                     />
-                    <span className="choiceText">{idx + 1}. {choice}</span>
+                    <span className="choiceText">
+                      {idx + 1}.{' '}
+                      {PLACEHOLDER_TEXT_PATTERN.test(choice)
+                        ? `이미지의 ${idx + 1}번 보기`
+                        : choice}
+                    </span>
                   </label>
                 ))}
               </div>
+              {hasPlaceholderContent(currentQuestion.stem, currentQuestion.choices) &&
+                resolvedQuestionFigureUrls(currentQuestion, figureByQuestionId).length === 0 && (
+                  <p className="questionImageHint">
+                    이 문항은 이미지가 필요한 문제입니다. 문제집을 삭제 후 동일 PDF를 다시 업로드해 주세요.
+                  </p>
+                )}
             </article>
           )}
           <div className="quizActionBar">
@@ -1289,6 +1765,63 @@ function App() {
               <button type="button" className="mypagePromoCard">
                 친구 초대하고 리워드 받기 ›
               </button>
+              <section className="syncPanel" aria-label="클라우드 동기화">
+                <div className="syncPanelHeader">
+                  <strong>클라우드 백업/동기화</strong>
+                  <span className={`syncBadge ${syncState}`}>{syncStateLabel}</span>
+                </div>
+                <p className="syncMeta">
+                  {authUser ? `로그인 계정: ${authUser.email ?? 'Google 사용자'}` : '현재 로컬 전용(익명) 모드입니다.'}
+                </p>
+                <p className="syncMeta">
+                  마지막 동기화: {lastSyncAt ? new Date(lastSyncAt).toLocaleString('ko-KR') : '없음'} · 실패 {syncErrorCount}건 · 대기 {syncPendingCount}건
+                </p>
+                <p className="syncMeta">
+                  오늘 클라우드 사용량: 읽기 {syncQuota.reads}/{syncQuota.readLimit} · 쓰기 {syncQuota.writes}/{syncQuota.writeLimit}
+                </p>
+                {syncQuota.blocked && (
+                  <p className="syncWarning">
+                    무료 보호모드: 오늘 클라우드 한도에 도달했습니다. 자동 동기화는 중지되며 로컬/JSON 백업은 계속 사용할 수 있습니다.
+                  </p>
+                )}
+                {!cloudReady && (
+                  <p className="syncWarning">
+                    Firebase 환경변수 설정이 필요합니다. (`VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, `VITE_FIREBASE_APP_ID`)
+                  </p>
+                )}
+                <div className="syncActions">
+                  {authUser ? (
+                    <button type="button" className="ghostButton" onClick={() => void signOutFromCloud()}>
+                      로그아웃
+                    </button>
+                  ) : (
+                    <button type="button" className="primaryButton" onClick={() => void signInWithGoogle()}>
+                      구글 로그인
+                    </button>
+                  )}
+                  <button type="button" className="ghostButton" disabled={!authUser || syncQuota.blocked} onClick={() => void backupNow()}>
+                    지금 백업
+                  </button>
+                  <button type="button" className="ghostButton" disabled={!authUser || syncQuota.blocked} onClick={() => void restoreFromCloud()}>
+                    클라우드 복원
+                  </button>
+                  <button type="button" className="ghostButton" onClick={() => exportJsonBackup()}>
+                    JSON 내보내기
+                  </button>
+                  <label className="ghostButton syncImportLabel">
+                    JSON 가져오기
+                    <input type="file" accept="application/json" onChange={(event) => void importJsonBackup(event)} />
+                  </label>
+                </div>
+                <label className="syncToggle">
+                  <input
+                    type="checkbox"
+                    checked={isAutoSyncOn}
+                    onChange={(event) => setIsAutoSyncOn(event.target.checked)}
+                  />
+                  자동 백업(5초 디바운스)
+                </label>
+              </section>
               <div className="mypageListGroup">
                 <button type="button" className="mypageListRow" onClick={() => setMyPageView('terms')}>
                   <span>이용약관</span>
@@ -1344,7 +1877,10 @@ function App() {
                   <h3>캐시 및 데이터 관리</h3>
                   <p>로컬에 저장된 문제집, 오답노트, 캐시를 모두 삭제합니다.</p>
                   <button type="button" className="dangerButton" onClick={() => void clearAppCache()}>
-                    캐시 삭제
+                    이 기기 데이터 삭제
+                  </button>
+                  <button type="button" className="ghostButton cloudDanger" onClick={() => void removeCloudBackup()}>
+                    클라우드 백업 삭제
                   </button>
                 </div>
               )}
@@ -1357,6 +1893,7 @@ function App() {
             </div>
           )}
           {settingsNotice && <p className="settingsNotice">{settingsNotice}</p>}
+          {syncNotice && <p className="settingsNotice">{syncNotice}</p>}
         </section>
       )}
 

@@ -1,0 +1,139 @@
+{
+  "ok": true,
+  "rootDir": "/Users/parkjto/Desktop/정보처리기사 필기_시험대비자료",
+  "fileCount": 12,
+  "parseResults": [
+    {
+      "filePath": "/Users/parkjto/Desktop/정보처리기사 필기_시험대비자료/2023년 기사필기 기출문제/1. 2023년01회_정보처리기사필기기출문제.pdf",
+      "fileName": "1. 2023년01회_정보처리기사필기기출문제.pdf",
+      "questionCount": 100,
+      "placeholderCount": 2,
+      "firstPlaceholder": 43
+    },
+    {
+      "filePath": "/Users/parkjto/Desktop/정보처리기사 필기_시험대비자료/2023년 기사필기 기출문제/2. 2023년02회_정보처리기사필기기출문제 복사본.pdf",
+      "fileName": "2. 2023년02회_정보처리기사필기기출문제 복사본.pdf",
+      "questionCount": 100,
+      "placeholderCount": 4,
+      "firstPlaceholder": 1
+    },
+    {
+      "filePath": "/Users/parkjto/Desktop/정보처리기사 필기_시험대비자료/2023년 기사필기 기출문제/2. 2023년02회_정보처리기사필기기출문제.pdf",
+      "fileName": "2. 2023년02회_정보처리기사필기기출문제.pdf",
+      "questionCount": 100,
+      "placeholderCount": 4,
+      "firstPlaceholder": 1
+    },
+    {
+      "filePath": "/Users/parkjto/Desktop/정보처리기사 필기_시험대비자료/2023년 기사필기 기출문제/3. 2023년03회_정보처리기사필기기출문제.pdf",
+      "fileName": "3. 2023년03회_정보처리기사필기기출문제.pdf",
+      "questionCount": 100,
+      "placeholderCount": 3,
+      "firstPlaceholder": 9
+    },
+    {
+      "filePath": "/Users/parkjto/Desktop/정보처리기사 필기_시험대비자료/2024년 기사필기 기출문제/1. 2024년1회_정보처리기사필기기출문제.pdf",
+      "fileName": "1. 2024년1회_정보처리기사필기기출문제.pdf",
+      "questionCount": 100,
+      "placeholderCount": 6,
+      "firstPlaceholder": 5
+    },
+    {
+      "filePath": "/Users/parkjto/Desktop/정보처리기사 필기_시험대비자료/2024년 기사필기 기출문제/2. 2024년2회_정보처리기사필기기출문제.pdf",
+      "fileName": "2. 2024년2회_정보처리기사필기기출문제.pdf",
+      "questionCount": 100,
+      "placeholderCount": 6,
+      "firstPlaceholder": 21
+    },
+    {
+      "filePath": "/Users/parkjto/Desktop/정보처리기사 필기_시험대비자료/2024년 기사필기 기출문제/3. 2024년3회_정보처리기사필기기출문제.pdf",
+      "fileName": "3. 2024년3회_정보처리기사필기기출문제.pdf",
+      "questionCount": 100,
+      "placeholderCount": 2,
+      "firstPlaceholder": 15
+    },
+    {
+      "filePath": "/Users/parkjto/Desktop/정보처리기사 필기_시험대비자료/2025_기출문제집_정보처리기사_필기_핵심요약.pdf",
+      "fileName": "2025_기출문제집_정보처리기사_필기_핵심요약.pdf",
+      "questionCount": 1,
+      "placeholderCount": 0,
+      "firstPlaceholder": null
+    },
+    {
+      "filePath": "/Users/parkjto/Desktop/정보처리기사 필기_시험대비자료/2025년 기사필기 기출문제/1. 2025년1회_정보처리기사필기기출문제.pdf",
+      "fileName": "1. 2025년1회_정보처리기사필기기출문제.pdf",
+      "questionCount": 100,
+      "placeholderCount": 0,
+      "firstPlaceholder": null
+    },
+    {
+      "filePath": "/Users/parkjto/Desktop/정보처리기사 필기_시험대비자료/2025년 기사필기 기출문제/2. 2025년2회_정보처리기사필기기출문제.pdf",
+      "fileName": "2. 2025년2회_정보처리기사필기기출문제.pdf",
+      "questionCount": 100,
+      "placeholderCount": 1,
+      "firstPlaceholder": 57
+    },
+    {
+      "filePath": "/Users/parkjto/Desktop/정보처리기사 필기_시험대비자료/2025년 기사필기 기출문제/3. 2025년3회_정보처리기사필기기출문제.pdf",
+      "fileName": "3. 2025년3회_정보처리기사필기기출문제.pdf",
+      "questionCount": 100,
+      "placeholderCount": 2,
+      "firstPlaceholder": 61
+    },
+    {
+      "filePath": "/Users/parkjto/Desktop/정보처리기사 필기_시험대비자료/2026_정보처리기사필기_기출문제집_핵심요약.pdf",
+      "fileName": "2026_정보처리기사필기_기출문제집_핵심요약.pdf",
+      "questionCount": 1,
+      "placeholderCount": 0,
+      "firstPlaceholder": null
+    }
+  ],
+  "browserChecks": [
+    {
+      "fileName": "1. 2023년01회_정보처리기사필기기출문제.pdf",
+      "targetQuestion": 43,
+      "error": "page.waitForFunction: Target page, context or browser has been closed"
+    },
+    {
+      "fileName": "2. 2023년02회_정보처리기사필기기출문제 복사본.pdf",
+      "targetQuestion": 1,
+      "error": "page.goto: Target page, context or browser has been closed"
+    },
+    {
+      "fileName": "2. 2023년02회_정보처리기사필기기출문제.pdf",
+      "targetQuestion": 1,
+      "error": "page.goto: Target page, context or browser has been closed"
+    },
+    {
+      "fileName": "3. 2023년03회_정보처리기사필기기출문제.pdf",
+      "targetQuestion": 9,
+      "error": "page.goto: Target page, context or browser has been closed"
+    },
+    {
+      "fileName": "1. 2024년1회_정보처리기사필기기출문제.pdf",
+      "targetQuestion": 5,
+      "error": "page.goto: Target page, context or browser has been closed"
+    },
+    {
+      "fileName": "2. 2024년2회_정보처리기사필기기출문제.pdf",
+      "targetQuestion": 21,
+      "error": "page.goto: Target page, context or browser has been closed"
+    },
+    {
+      "fileName": "3. 2024년3회_정보처리기사필기기출문제.pdf",
+      "targetQuestion": 15,
+      "error": "page.goto: Target page, context or browser has been closed"
+    },
+    {
+      "fileName": "2. 2025년2회_정보처리기사필기기출문제.pdf",
+      "targetQuestion": 57,
+      "error": "page.goto: Target page, context or browser has been closed"
+    },
+    {
+      "fileName": "3. 2025년3회_정보처리기사필기기출문제.pdf",
+      "targetQuestion": 61,
+      "error": "page.goto: Target page, context or browser has been closed"
+    }
+  ],
+  "checkedAt": "2026-05-06T22:59:58.807Z"
+}

@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "appUrl": "http://127.0.0.1:5174",
+  "pdfPath": "/Users/parkjto/Desktop/정보처리기사 필기_시험대비자료/2024년 기사필기 기출문제/1. 2024년1회_정보처리기사필기기출문제.pdf",
+  "meta": "5번 문제",
+  "figureCount": 1,
+  "srcPrefixes": [
+    "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAA"
+  ],
+  "hasImageHint": false,
+  "screenshot": "ui-scan/verify-q5-figure-result.png"
+}

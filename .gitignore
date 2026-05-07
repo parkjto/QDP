@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 .deploy-preview
+.npm-cache
 
 # Editor directories and files
 .vscode/*

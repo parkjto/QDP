@@ -1,0 +1,9 @@
+{
+  "ok": true,
+  "url": "http://127.0.0.1:4173/QDP/",
+  "captures": [
+    "deploy-01-home.png",
+    "deploy-02-after-upload.png",
+    "deploy-03-library.png"
+  ]
+}

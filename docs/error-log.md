@@ -144,3 +144,89 @@
   - `npm run scan:pdf` 결과 `questionCount: 100` 확인
   - `npm run test -- --run` 통과
   - `npm run build` 통과
+
+### 14) Firebase 미설정 환경에서 동기화 UI 오작동 위험
+- **증상**: Firebase 환경변수 미설정 시 로그인/동기화 버튼이 실패하거나 사용자 혼란 발생 가능
+- **원인**: 클라우드 기능을 로컬 모드와 분리하지 않으면 설정 누락 환경에서 오류 메시지 반복 노출
+- **해결**:
+  - Firebase 활성 여부(`isFirebaseEnabled`)를 분기해 로컬 모드 기본 동작 유지
+  - 마이페이지에 명시적인 설정 안내 및 진단 코드(`SYNC-*`) 추가
+  - JSON 내보내기/가져오기 경로를 항상 제공해 벤더 장애 대비
+- **검증**:
+  - `.env` 미설정 상태에서 앱 전체 플로우(업로드/풀이/복습) 정상 동작
+  - 로그인/백업/복원 액션 실패 시 사용자 안내 문구 노출 확인
+
+### 15) 무료 운영 중 동기화 과다 요청으로 비용 위험
+- **증상**: 자동 동기화가 잦으면 무료티어 상한 초과 가능성이 증가
+- **원인**: 데이터 변경이 많은 세션에서 클라우드 쓰기 요청 누적
+- **해결**:
+  - 동기화 5초 디바운스 + 동일 데이터 시그니처 중복 전송 차단
+  - 앱 내부 일일 읽기/쓰기 상한 도입(무료 보호모드)
+  - 한도 도달 시 자동 동기화 중지, 로컬/JSON 경로 유지
+- **검증**:
+  - 한도 도달 시 동기화 버튼/상태 배지 변화 확인
+  - 한도 도달 후에도 학습 플로우와 로컬 저장 정상 확인
+
+### 16) 특정 PDF에서 예상 문항 수가 554로 오탐지
+- **증상**: 업로드 시 `문항 누락 감지: 총 554문항 중 454개 누락`으로 실패
+- **재현 파일**: `3. 2024년3회_정보처리기사필기기출문제.pdf`
+- **원인**:
+  - 완결성 검증이 해설/정답 영역의 번호까지 예상 문항 수로 집계
+  - 정보처리기사 100문항 고정 규칙이 완결성 검증 경로에는 반영되지 않음
+- **해결**:
+  - 완결성 검증에서 정보처리기사 파일명(`NFC`)은 기대 문항 수를 100으로 고정
+  - 해설 구간 제외 본문 기준 번호만 예상 문항 수 계산
+  - 비정상 범위(130 초과) 번호는 예상 문항 수 계산에서 제외
+- **검증**:
+  - 해당 재현 파일 `scan:pdf` 결과 `questionCount: 100` 확인
+  - `npm run test -- --run` 통과
+  - `npm run build` 통과
+
+### 17) 기호/도형 문항에서 이미지 미노출(placeholder 선택지)
+- **증상**: 선택지가 `원문 이미지/도표` placeholder로 보이지만 실제 이미지가 문제 화면에 표시되지 않음
+- **원인**:
+  - 이미지 렌더링 대상을 `그래프/도표` 키워드가 있는 페이지만 제한
+  - `3.자료`처럼 점(.) 뒤 공백 없는 문항 번호 패턴 일부 누락
+- **해결**:
+  - 문항 시작 정규식을 `\d+\.\s*`로 완화해 번호 탐지 누락 방지
+  - 문항 번호가 존재하는 페이지도 이미지 렌더링 대상으로 포함
+  - 페이지 이미지 매핑 시 키워드 필터를 제거해 문항 번호 기준으로 연결
+- **검증**:
+  - 브라우저 E2E로 2024년 3회 5번 문항 진입 시 `.questionFigure` 노출 확인
+
+### 18) 업로드 전체 점검 시 placeholder 텍스트 가독성 저하
+- **증상**: 이미지가 붙어도 보기 텍스트가 `원문 이미지/도표 확인` 문구로 반복되어 풀이 피로도 증가
+- **원인**: 이미지 의존 문항에서 placeholder 문자열을 그대로 노출
+- **해결**:
+  - 이미지가 있는 placeholder 보기를 `이미지의 n번 보기`로 치환
+  - placeholder stem은 `문항 이미지를 보고 정답을 선택하세요.`로 치환
+  - 전체 업로드 자동 점검 스크립트(`scan:uploaded-pdfs`) 추가
+- **검증**:
+  - 지정된 12개 PDF 일괄 감사에서 placeholder 대상 문항의 `hasFigure: true` 확인
+  - 동일 문항의 첫 보기 텍스트가 placeholder 문구가 아닌 `이미지의 1번 보기`로 표시되는지 확인
+
+### 19) 페이지 이미지는 추출됐으나 재방문 시 표시 안 됨(localStorage 한도)
+- **증상**: 업로드 직후에는 보이는데 새로고침·다시 들어오면 이미지 없음(또는 곧바로 비어 있음)
+- **원인**: base64 전체 페이지 렌더 결과를 `localStorage`(`pdfQuiz.figureCache.v1`)에 두면 수~수십 MB 구간에서 `QuotaExceededError`로 저장 실패. React 상태만 갱신되는 경우는 탭을 닫으면 이미지 소실
+- **해결**:
+  - 문항 이미지 전용 IndexedDB 스토어(`pdfQuiz.figureImages.v1`)에 Data URL 저장(`figureImageDb.ts`)
+  - 기존 LS 캐시는 1회 마이그레이션 후 비움
+  - `renderPageImage`: 다중 배율/JPEG·PNG 시도로 렌더 실패·파손 URL 감소
+- **재발 방지**: 대용량 바이너리는 LS가 아닌 IndexedDB 등 사용. 업로드 후 강제 새로고침으로 이미지 유지 여부 확인
+
+### 20) 페이지 이미지는 있는데 특정 문항만 이미지 미매칭 (앵커 비었을 때 조기 종료)
+- **증상**: 페이지 canvas 렌더 결과는 존재하나 텍스트에서 `\d.\s` 형태 번호 추출 실패 시 placeholder 문항이 이미지 없음
+- **원인**: `attachFigureImages`에서 최근접 페이지 앵커 후보가 비면 `if (!bestImage) return question`으로 종료해, 이후 **버킷(문항 번호↔페이지 비례) 매핑**에 도달하지 못함. 일부 선택지는 본문 텍스트가 살아 있어 `choices.every(placeholder)`만으로는 fallback이 막히기도 함
+- **해결**:
+  - `needsFigureImageFallback`: `choices.some(placeholder)` + stem 복구 실패 패턴 포함
+  - stem 매칭 → 앵커 구간 포함 → 버킷 → 최근접 앵커 순으로 통합
+  - `extractQuestionNumbersInText`: 반각 `.`/`)` 외 전각 `．`, `)` 패턴 보강
+  - `renderPageImage`: `minBytes`로 유효 URL을 버리지 않도록 제거·흰 배경 렌더
+- **검증**: `attachFigureImages` 단위 테스트(앵커 없이 버킷 부착, 전각 번호 페이지)
+
+### 21) BBox(텍스트 transform) 기반 문항 블록 크롭 후 placeholder 문항에 우선 매칭
+- **목표**: 전체 페이지가 아니라 **문항 번호 줄의 뷰포트 Y범위~다음 번호 직전** 세로 블록을 잘라 “이미지의 n번 보기” 문제에 해당 도표 영역 우선 제공
+- **구현**: `spatialFigureCrop.ts` — `extractQuestionBandsFromViewport` + 같은 렌더 캔버스에서 `cropCanvasVertical`; `parser.ts`에서 페이지당 `extractSpatialFigureCropsForPage` 후 `spatialCropsByQuestionNumber`로 병합, `overlaySpatialFiguresOntoQuestions`가 `questionNeedsFigureImageFallback` 문항에 우선 적용
+- **데이터**: `Question.figures`, `Question.hasFigure` 타입 추가, IndexedDB에는 기존과 동일하게 대표 이미지 1개 키로 저장
+- **한계**: `getOperatorList`로 분리되는 **내장 Raster XObject만** 처리하는 게 아니라 **블록 크롭**이므로, 벡터/복잡 레이아웃은 여전히 PyMuPDF 수준 분석보다 거칠 수 있음 — 이후 단계에서 operator 기반 객체 추출로 보강 가능
+

@@ -13,9 +13,12 @@
     "scan:flow": "node scripts/full-flow-scan.mjs",
     "scan:deploy": "npm run build -- --base \"/QDP/\" && node scripts/verify-deploy-flow.mjs",
     "scan:pdf": "node --experimental-strip-types scripts/verify-pdf-parse.mjs",
-    "quality:gate": "node scripts/quality-gate.mjs"
+    "scan:uploaded-pdfs": "node --experimental-strip-types scripts/audit-uploaded-pdfs.mjs",
+    "quality:gate": "node scripts/quality-gate.mjs",
+    "verify:q5": "node scripts/verify-q5-figure.mjs"
   },
   "dependencies": {
+    "firebase": "^11.0.2",
     "pdfjs-dist": "^5.6.205",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
@@ -29,6 +32,7 @@
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
+    "@playwright/test": "^1.57.0",
     "@vitest/ui": "^4.1.5",
     "eslint": "^10.2.1",
     "eslint-plugin-react-hooks": "^7.1.1",

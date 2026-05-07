@@ -1,9 +1,16 @@
-import type { BookmarkItem, QuestionBundle, QuizAttemptItem, WrongAnswerItem } from '../types'
+import type {
+  BookmarkItem,
+  LocalAppData,
+  QuestionBundle,
+  QuizAttemptItem,
+  WrongAnswerItem,
+} from '../types'
 
 const QUESTION_BANK_KEY = 'pdfQuiz.questionBank.v2'
 const WRONG_NOTE_KEY = 'pdfQuiz.wrongAnswers.v1'
 const BOOKMARK_KEY = 'pdfQuiz.bookmarks.v1'
 const QUIZ_ATTEMPTS_KEY = 'pdfQuiz.quizAttempts.v1'
+const FIGURE_CACHE_KEY = 'pdfQuiz.figureCache.v1'
 
 const readJson = <T,>(key: string, fallback: T): T => {
   try {
@@ -107,4 +114,45 @@ export const removeQuizAttemptsByBundleId = (bundleId: string): QuizAttemptItem[
   const next = loadQuizAttempts().filter((item) => item.bundleId !== bundleId)
   writeJson(QUIZ_ATTEMPTS_KEY, next)
   return next
+}
+
+export const loadFigureCache = (): Record<string, string> =>
+  readJson<Record<string, string>>(FIGURE_CACHE_KEY, {})
+
+export const saveFigureCache = (cache: Record<string, string>): Record<string, string> => {
+  writeJson(FIGURE_CACHE_KEY, cache)
+  return cache
+}
+
+export const mergeFigureCache = (items: Record<string, string>): Record<string, string> => {
+  const next = { ...loadFigureCache(), ...items }
+  writeJson(FIGURE_CACHE_KEY, next)
+  return next
+}
+
+export const removeFigureCacheByBundleId = (bundleId: string): Record<string, string> => {
+  const next = Object.fromEntries(
+    Object.entries(loadFigureCache()).filter(([questionId]) => !questionId.startsWith(`${bundleId}-`)),
+  )
+  writeJson(FIGURE_CACHE_KEY, next)
+  return next
+}
+
+export const clearFigureCache = (): void => {
+  writeJson(FIGURE_CACHE_KEY, {})
+}
+
+export const loadLocalAppData = (): LocalAppData => ({
+  bundles: loadQuestionBundles(),
+  wrongAnswers: loadWrongAnswers(),
+  bookmarks: loadBookmarks(),
+  quizAttempts: loadQuizAttempts(),
+})
+
+export const replaceLocalAppData = (data: LocalAppData): LocalAppData => {
+  writeJson(QUESTION_BANK_KEY, data.bundles)
+  writeJson(WRONG_NOTE_KEY, data.wrongAnswers)
+  writeJson(BOOKMARK_KEY, data.bookmarks)
+  writeJson(QUIZ_ATTEMPTS_KEY, data.quizAttempts)
+  return loadLocalAppData()
 }

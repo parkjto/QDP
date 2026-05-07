@@ -1,13 +1,14 @@
 import type { Question } from '../../types'
+import {
+  extractSpatialFigureCropsForPage,
+  overlaySpatialFiguresOntoQuestions,
+} from './spatialFigureCrop'
 
 const CHOICE_MARKERS = ['①', '②', '③', '④']
 const MAX_PDF_SIZE_BYTES = 20 * 1024 * 1024
 const PDF_MAGIC_HEADER = '%PDF-'
 const MIN_STEM_LENGTH = 12
 const MAX_FALLBACK_QUESTIONS = 60
-const FIGURE_HINT_REGEX =
-  /(다음\s*(그래프|그림|도표)|아래\s*(그래프|그림|도표)|(?:다음|아래)\s*표\b|<그림>|도식|다이어그램)/i
-
 export type PdfErrorCode =
   | 'INVALID_TYPE'
   | 'TOO_LARGE'
@@ -171,6 +172,11 @@ const normalizeBlock = (value: string): string =>
     .replace(/\n{2,}/g, '\n')
     .trim()
 
+const isLikelyExamSourceName = (sourceName: string): boolean => {
+  const normalized = sourceName.normalize('NFC')
+  return /정보처리기사/.test(normalized) && /([123])회/.test(normalized)
+}
+
 const splitByChoiceMarkers = (block: string): { stem: string; choices: string[] } | null => {
   const indices = {
     a: [...block.matchAll(/①/g)].map((match) => match.index ?? -1).filter((index) => index >= 0),
@@ -271,7 +277,7 @@ const splitOptionsFromBlock = (block: string): { stem: string; choices: string[]
 
 const splitQuestionBlocksBySequence = (text: string): Array<{ number: number; block: string }> => {
   const questionZone = text.split(/(?:^|\n)\s*(?:\d+회\s*)?정답\s*(?:및)?\s*해설[\s\S]*$/m)[0] ?? text
-  const points = [...questionZone.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s+/g)].map((match) => ({
+  const points = [...questionZone.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s*/g)].map((match) => ({
     number: Number(match[1]),
     index: (match.index ?? 0) + match[0].lastIndexOf(match[1]),
   }))
@@ -350,6 +356,8 @@ const generateFallbackQuestions = (text: string, sourceName: string): Question[]
 
 const parseStructuredQuestions = (text: string, sourceName: string): Question[] => {
   const answerMap = parseAnswerMap(text)
+  const examSource = isLikelyExamSourceName(sourceName)
+  const examLike = examSource || answerMap.size >= 40
   const blocks = splitQuestionBlocksBySequence(text)
   const questions: Question[] = []
 
@@ -359,6 +367,7 @@ const parseStructuredQuestions = (text: string, sourceName: string): Question[] 
       .trim()
     const parsed = splitOptionsFromBlock(sanitizedBlock)
     if (!parsed) {
+      if (!examLike) continue
       const recoveredStem = normalizeBlock(sanitizedBlock)
       questions.push({
         id: `${sourceName}-${number}`,
@@ -402,11 +411,11 @@ const parseStructuredQuestions = (text: string, sourceName: string): Question[] 
   const maxNumberFromAnswerMap = Math.max(0, ...answerMap.keys())
   const numberingMax = Math.max(
     0,
-    ...[...text.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s+/g)].map((match) => Number(match[1])),
+    ...[...text.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s*/g)].map((match) => Number(match[1])),
   )
   const normalizedSourceName = sourceName.normalize('NFC')
   const expectedCountFromSource =
-    /정보처리기사/.test(normalizedSourceName) || /(?:^|[^0-9])100문항/.test(text) ? 100 : 0
+    (isLikelyExamSourceName(normalizedSourceName) || /(?:^|[^0-9])100문항/.test(text)) ? 100 : 0
   const safeNumberingMax = numberingMax >= 80 && numberingMax <= 130 ? numberingMax : 0
   const expectedCount =
     expectedCountFromSource > 0
@@ -414,7 +423,7 @@ const parseStructuredQuestions = (text: string, sourceName: string): Question[] 
       : Math.max(maxNumberFromAnswerMap, safeNumberingMax)
 
   // 누락 번호를 placeholder 문항으로 보강해 번호 누락을 방지
-  if (expectedCount > 0) {
+  if (expectedCount > 0 && examLike) {
     for (const number of [...uniqueByNumber.keys()]) {
       if (number > expectedCount) uniqueByNumber.delete(number)
     }
@@ -446,20 +455,29 @@ const parseQuestions = (text: string, sourceName: string): Question[] => {
   return generateFallbackQuestions(text, sourceName)
 }
 
-const detectExpectedQuestionCount = (text: string): number => {
+const detectExpectedQuestionCount = (text: string, sourceName: string): number => {
+  const normalizedSourceName = sourceName.normalize('NFC')
+  if (isLikelyExamSourceName(normalizedSourceName)) return 100
+
+  const questionZone = text.split(/(?:^|\n)\s*(?:\d+회\s*)?정답\s*(?:및)?\s*해설[\s\S]*$/m)[0] ?? text
   const answerMap = parseAnswerMap(text)
   const answerMax = Math.max(0, ...answerMap.keys())
-  if (answerMap.size >= 60 && answerMax >= 80) return answerMax
+  const safeAnswerMax = answerMap.size >= 60 && answerMax >= 80 && answerMax <= 130 ? answerMax : 0
 
   const numberingMax = Math.max(
     0,
-    ...[...text.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s+/g)].map((match) => Number(match[1])),
+    ...[...questionZone.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s*/g)].map((match) => Number(match[1])),
   )
-  return numberingMax >= 80 ? numberingMax : 0
+  const safeNumberingMax = numberingMax >= 80 && numberingMax <= 130 ? numberingMax : 0
+
+  const explicitCount = Number(questionZone.match(/(\d{2,3})\s*문항/)?.[1] ?? 0)
+  const safeExplicitCount = explicitCount >= 80 && explicitCount <= 130 ? explicitCount : 0
+
+  return Math.max(safeAnswerMax, safeNumberingMax, safeExplicitCount)
 }
 
-const ensureQuestionCompleteness = (questions: Question[], text: string): void => {
-  const expectedCount = detectExpectedQuestionCount(text)
+const ensureQuestionCompleteness = (questions: Question[], text: string, sourceName: string): void => {
+  const expectedCount = detectExpectedQuestionCount(text, sourceName)
   if (expectedCount <= 0) return
 
   const questionNums = new Set(questions.map((question) => question.number))
@@ -495,16 +513,68 @@ const loadPdfRuntime = async (): Promise<{ isBrowser: boolean; pdfjs: any }> => 
   return { isBrowser, pdfjs }
 }
 
-const renderPageImage = async (page: any): Promise<string | null> => {
-  if (typeof document === 'undefined') return null
-  const viewport = page.getViewport({ scale: 1.15 })
+type PdfUtilSingleton = { transform: (a: number[], b: number[]) => number[] }
+
+/** 일부 브라우저(GPU 메모리)에서 초대형 캔버스 렌더/.toDataURL() 이 연쇄 실패할 때를 줄이기 위한 상한 */
+const MAX_RENDER_CANVAS_DIMENSION = 6144
+
+const renderPageRasterAndSpatial = async (
+  page: any,
+  pdfUtil: PdfUtilSingleton | null,
+): Promise<{ pageImage: string | null; spatial: Map<number, string> }> => {
+  const emptySpatial = new Map<number, string>()
+  if (typeof document === 'undefined') return { pageImage: null, spatial: emptySpatial }
   const canvas = document.createElement('canvas')
-  const ctx = canvas.getContext('2d')
-  if (!ctx) return null
-  canvas.width = Math.max(1, Math.floor(viewport.width))
-  canvas.height = Math.max(1, Math.floor(viewport.height))
-  await page.render({ canvasContext: ctx, viewport }).promise
-  return canvas.toDataURL('image/jpeg', 0.58)
+  const ctx = canvas.getContext('2d', { alpha: false })
+  if (!ctx) return { pageImage: null, spatial: emptySpatial }
+
+  const tries = [
+    { scale: 1.05, quality: 0.42 },
+    { scale: 0.92, quality: 0.4 },
+    { scale: 0.82, quality: 0.38 },
+    { scale: 0.68, quality: 0.35 },
+    { scale: 0.55, quality: 0.32 },
+    { scale: 0.45, quality: 0.3 },
+    { scale: 0.38, quality: 0.28 },
+  ] as const
+
+  for (const { scale: baseScale, quality } of tries) {
+    try {
+      let renderScale = baseScale
+      let viewport = page.getViewport({ scale: renderScale })
+      while (
+        viewport.width > MAX_RENDER_CANVAS_DIMENSION ||
+        viewport.height > MAX_RENDER_CANVAS_DIMENSION
+      ) {
+        renderScale *= 0.88
+        if (renderScale < 0.34) break
+        viewport = page.getViewport({ scale: renderScale })
+      }
+      const width = Math.max(1, Math.floor(viewport.width))
+      const height = Math.max(1, Math.floor(viewport.height))
+      canvas.width = width
+      canvas.height = height
+      const renderTask = page.render({
+        canvasContext: ctx,
+        canvas,
+        viewport,
+        background: 'rgb(255, 255, 255)',
+      })
+      await renderTask.promise
+      const jpegUrl = canvas.toDataURL('image/jpeg', quality)
+      if (!jpegUrl.startsWith('data:image/jpeg') || jpegUrl.length < 96) continue
+
+      let spatial = emptySpatial
+      if (pdfUtil) {
+        spatial = await extractSpatialFigureCropsForPage(page, canvas, viewport, pdfUtil)
+      }
+
+      return { pageImage: jpegUrl, spatial }
+    } catch {
+      // 다음 해상도 시도
+    }
+  }
+  return { pageImage: null, spatial: emptySpatial }
 }
 
 const readPageTextSafely = async (page: any): Promise<string> => {
@@ -530,28 +600,206 @@ const readPageTextSafely = async (page: any): Promise<string> => {
   return ''
 }
 
-const extractQuestionNumbersInText = (text: string): number[] =>
-  [...text.matchAll(/(?:^|\n)\s*(\d{1,3})\.\s*/g)].map((match) => Number(match[1]))
+/** PDF 추출 텍스트에서 문항 번호 후보 (반각/전각 점, 괄호 번호 일부 지원, 번호·점이 줄바꿈으로 끊기는 경우 포함) */
+const extractQuestionNumbersInText = (text: string): number[] => {
+  const normalizedAscii = text.replace(/[\uFF10-\uFF19]/g, (char) =>
+    String.fromCharCode(char.charCodeAt(0) - 0xff10 + 0x30),
+  )
+  const fromLineStart = [
+    ...normalizedAscii.matchAll(/(?:^|\n)\s*(\d{1,3})\s*[.．]\s*/g),
+    ...normalizedAscii.matchAll(/(?:^|\n)\s*(\d{1,3})\s*\)\s*/g),
+  ].map((match) => Number(match[1]))
+  const splitDot = [...normalizedAscii.matchAll(/(?:^|\r?\n)\s*(\d{1,3})\s*\r?\n\s*[.．]/g)].map(
+    (match) => Number(match[1]),
+  )
+  return [...fromLineStart, ...splitDot]
+}
 
-const attachFigureImages = (
+const isPlaceholderChoice = (choice: string): boolean =>
+  /원문 이미지\/도표|선택지 원문 복구 필요|원문을 복구하지 못했습니다|원문 복구 필요/.test(
+    choice,
+  )
+
+export const questionNeedsFigureImageFallback = (question: Question): boolean =>
+  question.choices.some(isPlaceholderChoice) ||
+  /원문을 복구하지 못했습니다/.test(question.stem)
+
+const normalizeForMatch = (value: string): string =>
+  value.replace(/\s+/g, '').replace(/[^0-9A-Za-z가-힣]/g, '')
+
+export const attachFigureImages = (
   questions: Question[],
   pageRecords: Array<{ text: string; image: string | null }>,
 ): Question[] => {
+  const sortedQuestions = [...questions].sort((a, b) => a.number - b.number)
   const figureByNumber = new Map<number, string>()
+  const pageAnchors: Array<{ min: number; max: number; image: string }> = []
   for (const page of pageRecords) {
     if (!page.image) continue
-    if (!FIGURE_HINT_REGEX.test(page.text)) continue
-    for (const number of extractQuestionNumbersInText(page.text)) {
+    const nums = extractQuestionNumbersInText(page.text).filter((num) => num > 0 && num <= 200)
+    const numberSet = new Set(nums)
+    if (!numberSet.size) continue
+    const numbers = [...numberSet]
+    const min = Math.min(...numbers)
+    const max = Math.max(...numbers)
+    pageAnchors.push({ min, max, image: page.image })
+    for (const number of numbers) {
       if (!figureByNumber.has(number)) figureByNumber.set(number, page.image)
     }
   }
-  return questions.map((question) => ({
-    ...question,
-    figureImage: figureByNumber.get(question.number) ?? question.figureImage,
-  }))
+
+  const withMappedImages = sortedQuestions.map((question) => {
+    const mapped = figureByNumber.get(question.number) ?? question.figureImage
+    if (!mapped) return question
+    /** 전체 페이지 스냅은 일반 객관식에 붙이지 않음 → 도표/plcholder 문항만 연결 */
+    if (!questionNeedsFigureImageFallback(question)) return question
+    return { ...question, figureImage: mapped }
+  })
+
+  // 선택지가 placeholder인 문항은 근접 페이지 이미지를 강제로 연결해
+  // 기호/도형 문항이 텍스트 없이도 풀 수 있도록 보강한다.
+  const fallbackAnchors = pageAnchors.sort((a, b) => a.min - b.min)
+  const pagesWithImage = pageRecords.filter((page) => Boolean(page.image))
+  const maxQuestionNumber = Math.max(1, ...withMappedImages.map((item) => item.number))
+
+  return withMappedImages.map((question) => {
+    if (question.figureImage) return question
+    if (!questionNeedsFigureImageFallback(question)) return question
+
+    const stemToken = normalizeForMatch(question.stem).slice(0, 24)
+    if (stemToken.length >= 8) {
+      for (const page of pageRecords) {
+        if (!page.image) continue
+        const pageTextToken = normalizeForMatch(page.text)
+        if (pageTextToken.includes(stemToken)) {
+          return { ...question, figureImage: page.image }
+        }
+      }
+    }
+
+    for (const anchor of fallbackAnchors) {
+      if (question.number >= anchor.min && question.number <= anchor.max) {
+        return { ...question, figureImage: anchor.image }
+      }
+    }
+
+    // 마지막 fallback: 페이지 번호 구간으로 대략 매핑
+    // (텍스트 좌표가 불안정한 PDF에서도 이미지 미노출을 방지)
+    if (pagesWithImage.length > 0) {
+      const pageIdx = Math.min(
+        pagesWithImage.length - 1,
+        Math.max(0, Math.floor(((question.number - 1) / maxQuestionNumber) * pagesWithImage.length)),
+      )
+      const bucketImage = pagesWithImage[pageIdx]?.image ?? null
+      if (bucketImage) return { ...question, figureImage: bucketImage }
+    }
+
+    let nearestImage: string | null = null
+    let nearestDistance = Number.POSITIVE_INFINITY
+    for (const anchor of fallbackAnchors) {
+      const distance =
+        question.number < anchor.min
+          ? anchor.min - question.number
+          : question.number > anchor.max
+            ? question.number - anchor.max
+            : 0
+      if (distance < nearestDistance) {
+        nearestDistance = distance
+        nearestImage = anchor.image
+      }
+    }
+    if (nearestImage) return { ...question, figureImage: nearestImage }
+
+    return question
+  })
 }
 
-const readPdfPages = async (file: File): Promise<Array<{ text: string; image: string | null }>> => {
+export type PdfPageRecord = {
+  text: string
+  image: string | null
+}
+
+export type PdfReadResult = {
+  pages: PdfPageRecord[]
+  spatialCropsByQuestionNumber: Map<number, string>
+  totalPages: number
+}
+
+/**
+ * 동일 바이너리로 여러 페이지를 순회/readPdfPages/지연 래스터 에서 재사용.
+ */
+const createPdfJsDocument = async (
+  dataInput: Uint8Array,
+): Promise<{
+  pdf: any
+  pdfUtil: PdfUtilSingleton | null
+  isBrowser: boolean
+  destroyLoadingTask: () => Promise<void>
+}> => {
+  const data =
+    dataInput.byteOffset === 0 && dataInput.byteLength === dataInput.buffer.byteLength
+      ? dataInput
+      : new Uint8Array(dataInput)
+
+  const { isBrowser, pdfjs } = await loadPdfRuntime()
+  const { getDocument } = pdfjs
+  const pdfNs = pdfjs as { Util?: PdfUtilSingleton }
+  const pdfUtil: PdfUtilSingleton | null =
+    isBrowser && typeof pdfNs.Util?.transform === 'function' ? (pdfNs.Util as PdfUtilSingleton) : null
+
+  let loadingTask = getDocument({ data, stopAtErrors: false, isEvalSupported: false })
+  try {
+    const pdf = await loadingTask.promise
+    return {
+      pdf,
+      pdfUtil,
+      isBrowser,
+      destroyLoadingTask: () => loadingTask.destroy(),
+    }
+  } catch {
+    try {
+      await loadingTask.destroy()
+    } catch {
+      // ignore cleanup failure
+    }
+    loadingTask = getDocument({
+      data,
+      stopAtErrors: false,
+      isEvalSupported: false,
+      disableWorker: true,
+    })
+    try {
+      const pdf = await loadingTask.promise
+      return {
+        pdf,
+        pdfUtil,
+        isBrowser,
+        destroyLoadingTask: () => loadingTask.destroy(),
+      }
+    } catch {
+      try {
+        await loadingTask.destroy()
+      } catch {
+        // ignore cleanup failure
+      }
+      loadingTask = getDocument({
+        data,
+        stopAtErrors: false,
+        isEvalSupported: true,
+        disableWorker: true,
+      })
+      const pdf = await loadingTask.promise
+      return {
+        pdf,
+        pdfUtil,
+        isBrowser,
+        destroyLoadingTask: () => loadingTask.destroy(),
+      }
+    }
+  }
+}
+
+const readPdfPages = async (file: File): Promise<PdfReadResult> => {
   if (file.size > MAX_PDF_SIZE_BYTES) throw new PdfParseError('TOO_LARGE')
   if (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf') {
     throw new PdfParseError('INVALID_TYPE')
@@ -560,109 +808,172 @@ const readPdfPages = async (file: File): Promise<Array<{ text: string; image: st
   const header = new TextDecoder().decode(await file.slice(0, 8).arrayBuffer())
   if (!header.includes(PDF_MAGIC_HEADER)) throw new PdfParseError('INVALID_PDF')
 
-  const { isBrowser, pdfjs } = await loadPdfRuntime()
-  const { getDocument } = pdfjs
-
   const data = new Uint8Array(await file.arrayBuffer())
-  let loadingTask = getDocument({ data, stopAtErrors: false, isEvalSupported: false })
 
   try {
-    let pdf: any
+    const { pdf, pdfUtil, isBrowser, destroyLoadingTask } = await createPdfJsDocument(data)
     try {
-      pdf = await loadingTask.promise
-    } catch {
+      const totalPages = pdf.numPages
+      const pageTexts: string[] = []
+      const renderedImages: Array<string | null> = []
+      const spatialMerged = new Map<number, string>()
+
+      for (let pageNum = 1; pageNum <= totalPages; pageNum += 1) {
+        try {
+          const page = await pdf.getPage(pageNum)
+          const pageText = await readPageTextSafely(page)
+          pageTexts.push(pageText)
+          if (isBrowser) {
+            try {
+              const { pageImage, spatial } = await renderPageRasterAndSpatial(page as never, pdfUtil)
+              renderedImages.push(pageImage)
+              for (const [number, cropUrl] of spatial) {
+                const prev = spatialMerged.get(number)
+                if (!prev) spatialMerged.set(number, cropUrl)
+                /** 여러 페이지에서 같은 번호가 나오면 더 상세해 보이는(데이터량이 큰) 크롭을 선호해 잘못 된 얇은 줄 스캔을 덜어 줌 */
+                else if (cropUrl.length > prev.length * 1.08) spatialMerged.set(number, cropUrl)
+              }
+            } catch {
+              renderedImages.push(null)
+            }
+          } else {
+            renderedImages.push(null)
+          }
+        } catch {
+          pageTexts.push('')
+          renderedImages.push(null)
+        }
+      }
+
+      if (!pageTexts.some((text) => text.trim().length > 0)) {
+        throw new PdfParseError('MALFORMED_PDF')
+      }
+
+      return {
+        pages: pageTexts.map((text, index) => ({
+          text,
+          image: renderedImages[index] ?? null,
+        })),
+        spatialCropsByQuestionNumber: spatialMerged,
+        totalPages,
+      }
+    } finally {
       try {
-        await loadingTask.destroy()
+        await destroyLoadingTask()
       } catch {
         // ignore cleanup failure
       }
-      // iOS/Safari 환경에서 worker 초기화가 실패할 수 있어 무워커 모드로 재시도
-      loadingTask = getDocument({
-        data,
-        stopAtErrors: false,
-        isEvalSupported: false,
-        disableWorker: true,
-      })
-      try {
-        pdf = await loadingTask.promise
-      } catch {
-        try {
-          await loadingTask.destroy()
-        } catch {
-          // ignore cleanup failure
-        }
-        // Safari 일부 환경에서 옵션 조합에 따라 실패할 수 있어 마지막 완화 옵션 재시도
-        loadingTask = getDocument({
-          data,
-          stopAtErrors: false,
-          isEvalSupported: true,
-          disableWorker: true,
-        })
-        pdf = await loadingTask.promise
-      }
     }
-    const pageTexts: string[] = []
-    const figurePageIndexes: number[] = []
-
-    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum += 1) {
-      try {
-        const page = await pdf.getPage(pageNum)
-        const pageText = await readPageTextSafely(page)
-        pageTexts.push(pageText)
-        if (isBrowser && pageText && FIGURE_HINT_REGEX.test(pageText)) {
-          figurePageIndexes.push(pageNum - 1)
-        }
-      } catch {
-        // 페이지 단위 실패는 건너뛰고 다음 페이지를 계속 시도
-        pageTexts.push('')
-      }
-    }
-
-    if (!pageTexts.some((text) => text.trim().length > 0)) {
-      throw new PdfParseError('MALFORMED_PDF')
-    }
-
-    const imagesByIndex = new Map<number, string>()
-    if (isBrowser) {
-      for (const pageIndex of figurePageIndexes) {
-        const page = await pdf.getPage(pageIndex + 1)
-        try {
-          const rendered = await renderPageImage(page as never)
-          if (rendered) imagesByIndex.set(pageIndex, rendered)
-        } catch {
-          // Image rendering failures should not block text parsing.
-        }
-      }
-    }
-    return pageTexts.map((text, index) => ({
-      text,
-      image: imagesByIndex.get(index) ?? null,
-    }))
-  } catch {
+  } catch (error) {
+    if (error instanceof PdfParseError) throw error
     throw new PdfParseError('MALFORMED_PDF')
-  } finally {
+  }
+}
+
+/** 저장된 PDF 바이너리에서 총 페이지 수만 조회할 때 사용 */
+export const getPdfPageCountFromBytes = async (pdfBytes: Uint8Array): Promise<number | null> => {
+  if (typeof window === 'undefined') return null
+  try {
+    const { pdf, destroyLoadingTask } = await createPdfJsDocument(pdfBytes)
     try {
-      await loadingTask.destroy()
-    } catch {
-      // ignore cleanup failure
+      const n = pdf.numPages
+      return typeof n === 'number' && n > 0 ? n : null
+    } finally {
+      try {
+        await destroyLoadingTask()
+      } catch {
+        // ignore cleanup failure
+      }
     }
+  } catch {
+    return null
+  }
+}
+
+/** 풀이 화면 지연 렌더: 저장된 원본에서 특정 페이지만 JPEG Data URL 로 변환 */
+export const renderPdfPageIndexToDataUrl = async (
+  pdfBytes: Uint8Array,
+  pageNumber1Based: number,
+): Promise<string | null> => {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return null
+  try {
+    const { pdf, pdfUtil, destroyLoadingTask } = await createPdfJsDocument(pdfBytes)
+    try {
+      const n = pdf.numPages
+      const clamped = Math.min(Math.max(1, Math.floor(pageNumber1Based)), Math.max(1, n))
+      const page = await pdf.getPage(clamped)
+      const { pageImage } = await renderPageRasterAndSpatial(page as never, pdfUtil)
+      return pageImage
+    } finally {
+      try {
+        await destroyLoadingTask()
+      } catch {
+        // ignore cleanup failure
+      }
+    }
+  } catch {
+    return null
   }
 }
 
 export const extractTextFromPdf = async (file: File): Promise<string> => {
-  const pages = await readPdfPages(file)
+  const { pages } = await readPdfPages(file)
   return normalizeText(pages.map((page) => page.text).join('\n'))
 }
 
 export const parseQuestionsFromPdfText = (text: string, sourceName: string): Question[] =>
   parseQuestions(normalizeText(text), sourceName)
 
-export const parseQuestionsFromPdfFile = async (file: File, sourceName: string): Promise<Question[]> => {
-  const pages = await readPdfPages(file)
+const attachNearestRasterPageToPlaceholder = (
+  questions: Question[],
+  pageRasters: Array<string | null>,
+): Question[] => {
+  const rasters = pageRasters.filter((url): url is string => Boolean(url))
+  if (!rasters.length) return questions
+
+  const maxNum = Math.max(1, ...questions.map((q) => q.number))
+  return questions.map((question) => {
+    if (!questionNeedsFigureImageFallback(question)) return question
+    if (question.figureImage || question.figures?.length) return question
+
+    const pageIdx = Math.min(
+      rasters.length - 1,
+      Math.max(0, Math.floor(((question.number - 1) / maxNum) * rasters.length)),
+    )
+    const fallbackUrl = rasters[pageIdx]!
+    return {
+      ...question,
+      figureImage: fallbackUrl,
+      hasFigure: true,
+      figures: [{ dataUrl: fallbackUrl }],
+    }
+  })
+}
+
+export const parseQuestionsFromPdfFile = async (
+  file: File,
+  sourceName: string,
+): Promise<{ questions: Question[]; totalPages: number }> => {
+  const { pages, spatialCropsByQuestionNumber, totalPages } = await readPdfPages(file)
   const text = normalizeText(pages.map((page) => page.text).join('\n'))
   const parsed = parseQuestions(text, sourceName)
-  ensureQuestionCompleteness(parsed, text)
-  return attachFigureImages(parsed, pages)
+  ensureQuestionCompleteness(parsed, text, sourceName)
+  const withMapped = attachFigureImages(parsed, pages)
+  /** 고해상도 페이지 래스터를 붙인 뒤에도 플레이스홀더 도표 문항에는 spatial 크롭이 덮어씌워지도록 유지한다. */
+  let overlaid = overlaySpatialFiguresOntoQuestions(
+    withMapped,
+    spatialCropsByQuestionNumber,
+    (question) => questionNeedsFigureImageFallback(question),
+  )
+  overlaid = attachNearestRasterPageToPlaceholder(
+    overlaid,
+    pages.map((p) => p.image),
+  )
+  const questions = overlaid.map((question) => ({
+    ...question,
+    hasFigure: Boolean(question.figureImage || question.figures?.length),
+  }))
+  return { questions, totalPages }
 }
 
 export const analyzePdfTextStructure = (

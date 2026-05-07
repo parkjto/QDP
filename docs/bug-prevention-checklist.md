@@ -25,3 +25,10 @@
 - [ ] `node scripts/full-flow-scan.mjs` 실행 후 전 화면 스크린샷이 생성되는지 확인
 - [ ] `npm run test`, `npm run build`가 모두 통과하는지 확인
 - [ ] `npm run quality:gate` 실행 결과가 성공이고 `ui-scan/quality-gate-report.json`이 생성되는지 확인
+- [ ] Firebase 환경변수 미설정 상태에서 앱이 정상(로컬 모드) 동작하는지 확인
+- [ ] 구글 로그인 후 클라우드 백업/복원이 성공하는지 확인
+- [ ] JSON 내보내기/가져오기 후 문항 수/오답/책갈피 데이터가 유지되는지 확인
+- [ ] 무료 보호모드 한도 도달 시 자동 동기화가 중지되는지 확인
+- [ ] 무료 보호모드 도달 이후에도 로컬 학습/JSON 백업이 정상 동작하는지 확인
+- [ ] `npm run scan:uploaded-pdfs` 결과에서 placeholder 대상 문항이 `hasFigure: true`인지 확인
+- [ ] 이미지 의존 문항의 보기가 `이미지의 n번 보기` 형태로 표시되는지 확인
